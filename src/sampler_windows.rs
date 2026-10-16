@@ -1,7 +1,7 @@
 //! Usage from the kernel's process list, which needs no admin rights,
 //! and video memory from the performance counters that Task Manager also shows.
 
-use crate::{Proc, Sample, Total, Usage};
+use crate::{Gpu, Proc, Sample, Total, Usage};
 use std::{collections::HashMap, mem::size_of, slice};
 use windows::{
     Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemProcessInformation},
@@ -105,7 +105,8 @@ impl Sampler {
         for (proc, delta) in procs.iter_mut().zip(cpu_deltas) {
             proc.usage.cpu = delta as f32 * 100.0 / all_cpu_delta.max(1) as f32;
         }
-        Sample { memory: memory(), gpus, procs }
+        let (ram, commit) = memory();
+        Sample { ram, commit, gpus, procs }
     }
 
     /// Fills the buffer with the kernel's list of processes, growing it as needed.
@@ -162,7 +163,7 @@ impl Gpus {
     }
 
     /// Each GPU's use, and each process's use of each GPU by process id.
-    fn sample(&mut self) -> (Vec<Total>, HashMap<u32, Vec<u64>>) {
+    fn sample(&mut self) -> (Vec<Gpu>, HashMap<u32, Vec<u64>>) {
         unsafe { PdhCollectQueryData(self.query) };
         let mut per_process: HashMap<u32, Vec<u64>> = HashMap::new();
         for (instance, bytes) in values(self.per_process, &mut self.buf) {
@@ -178,8 +179,8 @@ impl Gpus {
                 used[gpu] += bytes;
             }
         }
-        let totals = self.adapters.iter().zip(used).map(|(adapter, used)| Total { name: adapter.name.clone(), used, total: adapter.memory }).collect();
-        (totals, per_process)
+        let gpus = self.adapters.iter().zip(used).map(|(adapter, used)| Gpu { name: adapter.name.clone(), vram: Total { used, total: adapter.memory } }).collect();
+        (gpus, per_process)
     }
 
     fn gpu(&self, instance: &str) -> Option<usize> {
@@ -227,13 +228,13 @@ fn values(counter: PDH_HCOUNTER, buf: &mut Vec<u64>) -> Vec<(String, u64)> {
     }
 }
 
-fn memory() -> Vec<Total> {
+/// RAM, and the commit charge against its limit.
+fn memory() -> (Total, Total) {
     let mut status = MEMORYSTATUSEX { dwLength: size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
     if unsafe { GlobalMemoryStatusEx(&mut status) }.is_err() {
-        return Vec::new();
+        return Default::default();
     }
-    vec![
-        Total { name: "RAM".to_owned(), used: status.ullTotalPhys - status.ullAvailPhys, total: status.ullTotalPhys },
-        Total { name: "Commit".to_owned(), used: status.ullTotalPageFile - status.ullAvailPageFile, total: status.ullTotalPageFile },
-    ]
+    let ram = Total { used: status.ullTotalPhys - status.ullAvailPhys, total: status.ullTotalPhys };
+    let commit = Total { used: status.ullTotalPageFile - status.ullAvailPageFile, total: status.ullTotalPageFile };
+    (ram, commit)
 }

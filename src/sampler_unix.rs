@@ -1,6 +1,6 @@
 //! Usage from sysinfo, plus the private memory and video memory of each process where Linux exposes them.
 
-use crate::{Proc, Sample, Total, Usage};
+use crate::{Gpu, Proc, Sample, Total, Usage};
 use std::collections::HashMap;
 use sysinfo::{CpuRefreshKind, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 #[cfg(target_os = "linux")]
@@ -47,16 +47,15 @@ impl Sampler {
                 Proc { pid, name: name.to_string_lossy().into_owned(), usage }
             })
             .collect();
-        let memory = vec![
-            Total { name: "RAM".to_owned(), used: self.system.used_memory(), total: self.system.total_memory() },
-            Total { name: "Swap".to_owned(), used: self.system.used_swap(), total: self.system.total_swap() },
-        ];
-        Sample { memory, gpus, procs }
+        let ram = Total { used: self.system.used_memory(), total: self.system.total_memory() };
+        // There's no commit limit, swap is what extends RAM.
+        let commit = Total { used: ram.used + self.system.used_swap(), total: ram.total + self.system.total_swap() };
+        Sample { ram, commit, gpus, procs }
     }
 
     /// Each GPU's use, and each process's use of each GPU by process id.
     #[cfg(target_os = "linux")]
-    fn gpus(&self) -> (Vec<Total>, HashMap<u32, Vec<u64>>) {
+    fn gpus(&self) -> (Vec<Gpu>, HashMap<u32, Vec<u64>>) {
         let mut gpus = Vec::new();
         let mut vram: HashMap<u32, Vec<u64>> = HashMap::new();
         let mut set = |pid: u32, gpu: usize, bytes: u64| {
@@ -75,7 +74,7 @@ impl Sampler {
                         set(process.pid, gpus.len(), bytes);
                     }
                 }
-                gpus.push(Total { name, used: memory.used, total: memory.total });
+                gpus.push(Gpu { name, vram: Total { used: memory.used, total: memory.total } });
             }
         }
         // AMD's driver tells in sysfs, and in the fdinfo of the device files that processes have open.
@@ -89,12 +88,12 @@ impl Sampler {
                 }
             }
         }
-        gpus.extend(amd.into_iter().map(|(_, total)| total));
+        gpus.extend(amd.into_iter().map(|(_, gpu)| gpu));
         (gpus, vram)
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn gpus(&self) -> (Vec<Total>, HashMap<u32, Vec<u64>>) {
+    fn gpus(&self) -> (Vec<Gpu>, HashMap<u32, Vec<u64>>) {
         Default::default()
     }
 }
@@ -114,7 +113,7 @@ fn private_memory(_pid: u32) -> Option<(u64, u64)> {
 
 /// AMD GPUs by PCI address, like "0000:03:00.0", with their VRAM use.
 #[cfg(target_os = "linux")]
-fn amd_gpus() -> Vec<(String, Total)> {
+fn amd_gpus() -> Vec<(String, Gpu)> {
     let Ok(cards) = fs::read_dir("/sys/class/drm") else { return Vec::new() };
     let mut gpus: Vec<_> = cards
         .flatten()
@@ -125,7 +124,7 @@ fn amd_gpus() -> Vec<(String, Total)> {
             let read = |file: &str| -> Option<u64> { fs::read_to_string(device.join(file)).ok()?.trim().parse().ok() };
             let (total, used) = (read("mem_info_vram_total")?, read("mem_info_vram_used")?);
             let pdev = fs::canonicalize(&device).ok()?.file_name()?.to_string_lossy().into_owned();
-            Some((pdev, Total { name: format!("AMD {}", card.file_name().to_string_lossy()), used, total }))
+            Some((pdev, Gpu { name: format!("AMD {}", card.file_name().to_string_lossy()), vram: Total { used, total } }))
         })
         .collect();
     gpus.sort_by(|a, b| a.1.name.cmp(&b.1.name));

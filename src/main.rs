@@ -16,7 +16,7 @@ use std::{
 const REFRESH: Duration = Duration::from_secs(1);
 const NAME_TIP: &str = "Processes grouped by executable. Click a program with several processes to list them.";
 const RAM_TIP: &str = "Physical memory that only this program uses, which ending it frees.";
-const COMMIT_TIP: &str = "Memory that only this program uses, also counting what was moved out of RAM to the page file, swap or compressed memory.";
+const COMMIT_TIP: &str = "Memory that only this program uses, also counting what was moved out of RAM to the page file, swap or compressed memory. Its total is limited to RAM plus page file or swap.";
 const CPU_TIP: &str = "Share of the time of all CPU cores, over the last second.";
 
 /// What a process uses, or all the processes of a program.
@@ -52,18 +52,23 @@ pub struct Proc {
 }
 
 /// How much of some memory is in use.
+#[derive(Default)]
 pub struct Total {
-    pub name: String,
     pub used: u64,
     pub total: u64,
 }
 
+pub struct Gpu {
+    pub name: String,
+    pub vram: Total,
+}
+
 #[derive(Default)]
 pub struct Sample {
-    /// RAM, and commit or swap.
-    pub memory: Vec<Total>,
-    /// The video memory of each GPU.
-    pub gpus: Vec<Total>,
+    pub ram: Total,
+    /// The commit charge against its limit, or RAM plus swap.
+    pub commit: Total,
+    pub gpus: Vec<Gpu>,
     pub procs: Vec<Proc>,
 }
 
@@ -95,6 +100,16 @@ impl Col {
             Col::Cpu if value > 0.0 => format!("{value:.1}%"),
             Col::Ram | Col::Commit | Col::Vram(_) if value > 0.0 => size(value as u64),
             _ => String::new(),
+        }
+    }
+
+    /// The system-wide use of the memory in the column.
+    fn total(self, sample: &Sample) -> Option<&Total> {
+        match self {
+            Col::Ram => Some(&sample.ram),
+            Col::Commit => Some(&sample.commit),
+            Col::Vram(gpu) => sample.gpus.get(gpu).map(|gpu| &gpu.vram),
+            Col::Name | Col::Cpu => None,
         }
     }
 }
@@ -149,10 +164,11 @@ impl App {
         }
     }
 
-    fn groups(&self) -> Vec<Group<'_>> {
+    /// Only borrows the processes, for the filter to stay editable while the groups are shown.
+    fn groups<'a>(&self, procs: &'a [Proc]) -> Vec<Group<'a>> {
         let filter = self.filter.to_lowercase();
         let mut groups = HashMap::new();
-        for proc in self.sample.procs.iter().filter(|proc| proc.name.to_lowercase().contains(&filter)) {
+        for proc in procs.iter().filter(|proc| proc.name.to_lowercase().contains(&filter)) {
             let group = groups.entry(proc.name.as_str()).or_insert_with(|| Group { name: &proc.name, usage: Usage::default(), procs: Vec::new() });
             group.usage.add(&proc.usage);
             group.procs.push(proc);
@@ -163,23 +179,6 @@ impl App {
         }
         groups.sort_by(|a, b| self.order((a.name, &a.usage), (b.name, &b.usage)).then_with(|| by_name(a.name, b.name)));
         groups
-    }
-
-    fn totals_ui(&mut self, ui: &mut egui::Ui) {
-        let gpus = &self.sample.gpus;
-        let memory = self.sample.memory.iter().filter(|total| total.total > 0).map(|total| (total, total.name.clone()));
-        let vram = gpus.iter().enumerate().map(|(gpu, total)| (total, vram_title(gpus, gpu)));
-        ui.horizontal_wrapped(|ui| {
-            for (total, title) in memory.chain(vram) {
-                let response = bar(ui, total.used as f32 / total.total as f32, format!("{title} {} / {}", size(total.used), size(total.total)));
-                if title != total.name {
-                    response.on_hover_text(total.name.as_str());
-                }
-            }
-            let cpu: f32 = self.sample.procs.iter().map(|proc| proc.usage.cpu).sum();
-            bar(ui, cpu / 100.0, format!("CPU {cpu:.0}%"));
-        });
-        ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter programs").desired_width(250.0));
     }
 
     fn table_ui(&mut self, ui: &mut egui::Ui) {
@@ -194,7 +193,7 @@ impl App {
         }
         cols.push((Col::Cpu, "CPU".to_owned(), CPU_TIP.to_owned()));
 
-        let groups = self.groups();
+        let groups = self.groups(&self.sample.procs);
         let mut rows = Vec::new();
         for group in &groups {
             rows.push(Row::Group(group));
@@ -202,9 +201,12 @@ impl App {
                 rows.extend(group.procs.iter().map(|&proc| Row::Proc(proc)));
             }
         }
+        let cpu: f32 = self.sample.procs.iter().map(|proc| proc.usage.cpu).sum();
 
         let (mut sort, mut toggle) = (None, None);
         let height = ui.spacing().interact_size.y;
+        // The titles, with the filter or the system-wide totals below them.
+        let header_height = 2.0 * (height + ui.spacing().item_spacing.y);
         let right = egui::Layout::right_to_left(egui::Align::Center);
         // Selectable text would take the clicks on the rows.
         ui.style_mut().interaction.selectable_labels = false;
@@ -219,7 +221,7 @@ impl App {
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::remainder().at_least(150.0).clip(true))
             .columns(Column::initial(95.0).at_least(50.0), cols.len() - 1)
-            .header(height, |mut header| {
+            .header(header_height, |mut header| {
                 for (col, title, tip) in &cols {
                     header.col(|ui| {
                         let arrow = match (self.sort == *col, self.descending) {
@@ -227,11 +229,25 @@ impl App {
                             (true, true) => " ⏷",
                             (true, false) => " ⏶",
                         };
-                        let label = |ui: &mut egui::Ui| ui.selectable_label(self.sort == *col, format!("{title}{arrow}")).on_hover_text(tip);
-                        let response = if *col == Col::Name { label(ui) } else { ui.with_layout(right, label).inner };
-                        if response.clicked() {
-                            sort = Some(*col);
-                        }
+                        let align = if *col == Col::Name { egui::Align::Min } else { egui::Align::Max };
+                        ui.with_layout(egui::Layout::top_down(align), |ui| {
+                            if ui.selectable_label(self.sort == *col, format!("{title}{arrow}")).on_hover_text(tip).clicked() {
+                                sort = Some(*col);
+                            }
+                            match col {
+                                Col::Name => {
+                                    ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter programs").desired_width(f32::INFINITY));
+                                }
+                                Col::Cpu => {
+                                    bar(ui, cpu / 100.0, format!("{cpu:.0}%"));
+                                }
+                                _ => {
+                                    if let Some(total) = col.total(&self.sample).filter(|total| total.total > 0) {
+                                        bar(ui, total.used as f32 / total.total as f32, used_of(total));
+                                    }
+                                }
+                            }
+                        });
                     });
                 }
             })
@@ -294,7 +310,6 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::Panel::top("totals").show(ui, |ui| self.totals_ui(ui));
         egui::CentralPanel::default().show(ui, |ui| self.table_ui(ui));
     }
 }
@@ -306,18 +321,28 @@ fn by_name(a: &str, b: &str) -> Ordering {
 
 /// Like "0.3 MB", "512 MB" or "3.2 GB".
 fn size(bytes: u64) -> String {
-    let mb = bytes as f64 / (1 << 20) as f64;
-    if mb < 10.0 {
-        format!("{mb:.1} MB")
-    } else if mb < 1000.0 {
-        format!("{mb:.0} MB")
-    } else {
-        format!("{:.1} GB", mb / 1024.0)
+    let (unit, decimals, name) = unit(bytes);
+    format!("{:.*} {name}", decimals, bytes as f64 / unit)
+}
+
+/// Like "18.2 / 31.2 GB", both in the unit that suits the total.
+fn used_of(total: &Total) -> String {
+    let (unit, decimals, name) = unit(total.total);
+    format!("{:.*} / {:.*} {name}", decimals, total.used as f64 / unit, decimals, total.total as f64 / unit)
+}
+
+/// The unit that suits a size, how many decimals to show it with, and the unit's name.
+fn unit(bytes: u64) -> (f64, usize, &'static str) {
+    const MB: f64 = (1 << 20) as f64;
+    match bytes as f64 / MB {
+        mb if mb < 10.0 => (MB, 1, "MB"),
+        mb if mb < 1000.0 => (MB, 0, "MB"),
+        _ => (MB * 1024.0, 1, "GB"),
     }
 }
 
 /// "VRAM", followed by the GPU's vendor when there are several, like on laptops with integrated graphics.
-fn vram_title(gpus: &[Total], gpu: usize) -> String {
+fn vram_title(gpus: &[Gpu], gpu: usize) -> String {
     if gpus.len() == 1 {
         return "VRAM".to_owned();
     }
@@ -325,11 +350,11 @@ fn vram_title(gpus: &[Total], gpu: usize) -> String {
     format!("VRAM {}", vendor.replace("(R)", "").replace("(TM)", ""))
 }
 
-/// A bar with its text inside, sized to the text since bars otherwise fill the row.
+/// A bar with its text inside, filling the column, which widens if the text needs it.
 fn bar(ui: &mut egui::Ui, fraction: f32, text: String) -> egui::Response {
     let font = egui::TextStyle::Button.resolve(ui.style());
-    let width = ui.painter().layout_no_wrap(text.clone(), font, egui::Color32::PLACEHOLDER).size().x;
-    ui.add(egui::ProgressBar::new(fraction).text(text).desired_width(width + 2.0 * ui.spacing().item_spacing.x))
+    let width = ui.painter().layout_no_wrap(text.clone(), font, egui::Color32::PLACEHOLDER).size().x + 2.0 * ui.spacing().item_spacing.x;
+    ui.add(egui::ProgressBar::new(fraction).text(text).desired_width(width.max(ui.available_width())))
 }
 
 fn main() -> eframe::Result {
@@ -352,7 +377,8 @@ mod tests {
         let sample = sampler.sample();
         let own = sample.procs.iter().find(|proc| proc.pid == std::process::id()).expect("own process listed");
         assert!(own.usage.ram > 0 && !own.name.is_empty());
-        assert!(sample.memory.iter().all(|total| total.used <= total.total));
+        assert!(0 < sample.ram.used && sample.ram.used <= sample.ram.total);
+        assert!(sample.commit.used <= sample.commit.total);
         let cpu: f32 = sample.procs.iter().map(|proc| proc.usage.cpu).sum();
         assert!(cpu <= 101.0, "total CPU {cpu}%");
     }
