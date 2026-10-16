@@ -174,6 +174,8 @@ struct App {
     history: VecDeque<HashMap<String, Usage>>,
     /// Whether to offer relaunching as admin, which per-process network needs.
     offer_admin: bool,
+    /// Whether the window has been confirmed on a monitor, so the off-screen check can stop.
+    placed: bool,
     ctx: egui::Context,
     /// The last place the window was shown normally, kept across minimizing and maximizing.
     window: Option<WindowPlace>,
@@ -205,6 +207,7 @@ impl App {
             expanded: HashSet::new(),
             history: VecDeque::new(),
             offer_admin: sampler::offer_admin(),
+            placed: false,
             window: cc.storage.and_then(|storage| eframe::get_value(storage, WINDOW_KEY)),
             ctx,
         }
@@ -415,6 +418,11 @@ impl eframe::App for App {
     }
 
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // eframe misplaces saved positions across mixed-DPI monitors and can restore onto a gone or VR display, so place it ourselves.
+        if !self.placed {
+            let saved = self.window.and_then(|place| place.outer_position_pixels).map(|pos| (pos.x as i32, pos.y as i32));
+            self.placed = sampler::place_window(saved);
+        }
         if let Some(sample) = self.rx.try_iter().last() {
             self.sample = sample;
             let mut snapshot: HashMap<String, Usage> = HashMap::new();

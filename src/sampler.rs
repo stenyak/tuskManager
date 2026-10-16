@@ -16,8 +16,11 @@ use std::{
 use windows::{
     Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemProcessInformation},
     Win32::{
-        Foundation::{CloseHandle, ERROR_ACCESS_DENIED, ERROR_SUCCESS, HANDLE, STATUS_INFO_LENGTH_MISMATCH, UNICODE_STRING},
-        Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1},
+        Foundation::{CloseHandle, ERROR_ACCESS_DENIED, ERROR_SUCCESS, FALSE, HANDLE, HWND, LPARAM, POINT, RECT, STATUS_INFO_LENGTH_MISMATCH, TRUE, UNICODE_STRING},
+        Graphics::{
+            Dxgi::{CreateDXGIFactory1, IDXGIFactory1},
+            Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint},
+        },
         NetworkManagement::{
             IpHelper::{FreeMibTable, GetIfTable2, IF_TYPE_SOFTWARE_LOOPBACK, MIB_IF_TABLE2},
             Ndis::IfOperStatusUp,
@@ -34,11 +37,14 @@ use windows::{
                 PdhCollectQueryData, PdhGetFormattedCounterArrayW, PdhOpenQueryW,
             },
             SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX},
-            Threading::{GetCurrentProcess, OpenProcessToken},
+            Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcessToken},
         },
-        UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
+        UI::{
+            Shell::ShellExecuteW,
+            WindowsAndMessaging::{EnumWindows, GetCursorPos, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible, SW_SHOWNORMAL, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos},
+        },
     },
-    core::{GUID, PCWSTR, PWSTR, w},
+    core::{BOOL, GUID, PCWSTR, PWSTR, w},
 };
 
 /// The start of SYSTEM_PROCESS_INFORMATION, named as in System Informer's headers since most of it is undocumented.
@@ -458,6 +464,60 @@ fn elevated() -> bool {
         let _ = CloseHandle(token);
         ok && elevation.TokenIsElevated != 0
     }
+}
+
+/// Positions the window on startup, since eframe misplaces saved positions across mixed-DPI monitors: back to its saved
+/// spot when that's on the primary monitor or the one the user is working on, otherwise centered on the primary. This keeps
+/// it off a vanished or VR virtual monitor. `saved` is the saved top-left in pixels. Returns true once done.
+pub fn place_window(saved: Option<(i32, i32)>) -> bool {
+    let Some(hwnd) = main_window() else { return false };
+    unsafe {
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &mut rect).is_err() {
+            return false;
+        }
+        let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
+        // eframe sizes the window a frame or two after creation; wait for its real size before placing it.
+        if width < 200 || height < 150 {
+            return false;
+        }
+        let primary = MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY);
+        let mut cursor = POINT::default();
+        let _ = GetCursorPos(&mut cursor);
+        let under_cursor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONULL);
+        // Restore the saved spot only if it sits on the primary monitor or the one the user is working on.
+        if let Some((x, y)) = saved {
+            let saved_monitor = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONULL);
+            if !saved_monitor.is_invalid() && (saved_monitor.0 == primary.0 || saved_monitor.0 == under_cursor.0) {
+                let _ = SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+                return true;
+            }
+        }
+        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if GetMonitorInfoW(primary, &mut info).as_bool() {
+            let work = info.rcWork;
+            let x = work.left + ((work.right - work.left - width) / 2).max(0);
+            let y = work.top + ((work.bottom - work.top - height) / 2).max(0);
+            let _ = SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+        }
+    }
+    true
+}
+
+/// This process's visible top-level window.
+fn main_window() -> Option<HWND> {
+    unsafe extern "system" fn visit(hwnd: HWND, out: LPARAM) -> BOOL {
+        let mut pid = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        if pid == unsafe { GetCurrentProcessId() } && unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            unsafe { *(out.0 as *mut HWND) = hwnd };
+            return FALSE;
+        }
+        TRUE
+    }
+    let mut hwnd = HWND::default();
+    let _ = unsafe { EnumWindows(Some(visit), LPARAM(&mut hwnd as *mut _ as isize)) };
+    (!hwnd.is_invalid()).then_some(hwnd)
 }
 
 /// Starts a new elevated instance, prompting for admin rights. The caller should then exit.

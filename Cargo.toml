@@ -10,6 +10,7 @@ serde = { version = "1", features = ["derive"] }
 windows = { version = "0.62.2", features = [
     "Wdk_System_SystemInformation",
     "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Gdi",
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_Security",
