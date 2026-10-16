@@ -61,6 +61,8 @@ impl Usage {
 
 pub struct Proc {
     pub pid: u32,
+    /// The process that started this one, for ending a whole tree.
+    pub parent: u32,
     /// The executable's file name.
     pub name: String,
     pub usage: Usage,
@@ -287,7 +289,7 @@ impl App {
         let cpu: f32 = self.sample.procs.iter().map(|proc| proc.usage.cpu).sum();
         let disk: u64 = self.sample.procs.iter().map(|proc| proc.usage.disk).sum();
 
-        let (mut sort, mut toggle, mut relaunch) = (None, None, false);
+        let (mut sort, mut toggle, mut relaunch, mut kill) = (None, None, false, None);
         let height = ui.spacing().interact_size.y;
         // The totals or filter on top, the sortable title below.
         let header_height = 2.0 * (height + ui.spacing().item_spacing.y);
@@ -339,22 +341,47 @@ impl App {
                         Row::Group(group) => (&group.usage, Some(group)),
                         Row::Proc(proc) => (&proc.usage, None),
                     };
-                    row.col(|ui| match rows[index] {
-                        Row::Group(group) => {
-                            let several = group.procs.len() > 1;
-                            let arrow = match (several, self.expanded.contains(group.name)) {
-                                (false, _) => "",
-                                (true, false) => "⏵",
-                                (true, true) => "⏷",
-                            };
-                            ui.add_sized([12.0, height], egui::Label::new(arrow));
-                            let text = if several { format!("{} ({})", group.name, group.procs.len()) } else { group.name.to_owned() };
-                            ui.add(egui::Label::new(text).truncate());
-                        }
-                        Row::Proc(proc) => {
-                            ui.add_space(32.0);
-                            ui.label(egui::RichText::new(format!("PID {}", proc.pid)).weak());
-                        }
+                    let mut acted = false;
+                    row.col(|ui| {
+                        // Hovering a row reveals buttons to end its program or process, on the right of its name.
+                        let hovered = ui.rect_contains_pointer(ui.max_rect());
+                        egui::containers::Sides::new().shrink_left().show(
+                            ui,
+                            |ui| match rows[index] {
+                                Row::Group(group) => {
+                                    let several = group.procs.len() > 1;
+                                    let arrow = match (several, self.expanded.contains(group.name)) {
+                                        (false, _) => "",
+                                        (true, false) => "⏵",
+                                        (true, true) => "⏷",
+                                    };
+                                    ui.add_sized([12.0, height], egui::Label::new(arrow));
+                                    let text = if several { format!("{} ({})", group.name, group.procs.len()) } else { group.name.to_owned() };
+                                    ui.add(egui::Label::new(text).truncate());
+                                }
+                                Row::Proc(proc) => {
+                                    ui.add_space(32.0);
+                                    ui.label(egui::RichText::new(format!("PID {}", proc.pid)).weak());
+                                }
+                            },
+                            |ui| {
+                                if !hovered {
+                                    return;
+                                }
+                                let (pids, what) = match rows[index] {
+                                    Row::Group(group) => (group.procs.iter().map(|proc| proc.pid).collect::<Vec<_>>(), "program"),
+                                    Row::Proc(proc) => (vec![proc.pid], "process"),
+                                };
+                                if ui.button("End tree").on_hover_text(format!("End this {what} and everything it started")).clicked() {
+                                    kill = Some(with_descendants(&self.sample.procs, &pids));
+                                    acted = true;
+                                }
+                                if ui.button("End").on_hover_text(format!("End this {what}")).clicked() {
+                                    kill = Some(pids);
+                                    acted = true;
+                                }
+                            },
+                        );
                     });
                     for (i, (col, ..)) in cols.iter().enumerate().skip(1) {
                         row.col(|ui| {
@@ -370,6 +397,7 @@ impl App {
                     }
                     if let Some(group) = group
                         && group.procs.len() > 1
+                        && !acted
                         && row.response().clicked()
                     {
                         toggle = Some(group.name.to_owned());
@@ -390,6 +418,9 @@ impl App {
         if relaunch {
             sampler::relaunch_as_admin();
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if let Some(pids) = kill {
+            sampler::end(&pids);
         }
     }
 }
@@ -444,6 +475,22 @@ impl eframe::App for App {
 /// Ignoring case, unless that's the only difference.
 fn by_name(a: &str, b: &str) -> Ordering {
     a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| a.cmp(b))
+}
+
+/// The given processes plus every process descended from them, by following parent links.
+fn with_descendants(procs: &[Proc], roots: &[u32]) -> Vec<u32> {
+    let mut all: HashSet<u32> = roots.iter().copied().collect();
+    loop {
+        let before = all.len();
+        for proc in procs {
+            if all.contains(&proc.parent) {
+                all.insert(proc.pid);
+            }
+        }
+        if all.len() == before {
+            return all.into_iter().collect();
+        }
+    }
 }
 
 /// Like "0.3 MB", "512 MB" or "3.2 GB".

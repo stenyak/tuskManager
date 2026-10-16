@@ -37,7 +37,7 @@ use windows::{
                 PdhCollectQueryData, PdhGetFormattedCounterArrayW, PdhOpenQueryW,
             },
             SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX},
-            Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcessToken},
+            Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_TERMINATE, TerminateProcess},
         },
         UI::{
             Shell::ShellExecuteW,
@@ -62,7 +62,7 @@ struct ProcessInfo {
     image_name: UNICODE_STRING,
     _base_priority: i32,
     unique_process_id: usize,
-    _inherited_from_unique_process_id: usize,
+    inherited_from_unique_process_id: usize,
     _handle_count: u32,
     _session_id: u32,
     _unique_process_key: usize,
@@ -153,7 +153,7 @@ impl Sampler {
                         net,
                     };
                     disk_bytes.insert((pid, info.create_time), io);
-                    procs.push(Proc { pid, name, usage });
+                    procs.push(Proc { pid, parent: info.inherited_from_unique_process_id as u32, name, usage });
                     cpu_deltas.push(cpu_delta);
                 }
                 if info.next_entry_offset == 0 {
@@ -443,6 +443,18 @@ unsafe extern "system" fn on_event(record: *mut EVENT_RECORD) {
             entry.0 += bytes;
         } else {
             entry.1 += bytes;
+        }
+    }
+}
+
+/// Terminates each of the given processes, those it has the rights to open.
+pub fn end(pids: &[u32]) {
+    for &pid in pids {
+        unsafe {
+            if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, pid) {
+                let _ = TerminateProcess(handle, 1);
+                let _ = CloseHandle(handle);
+            }
         }
     }
 }
