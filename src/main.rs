@@ -315,7 +315,9 @@ impl App {
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             // Only a remainder column that isn't resizable keeps filling the table as the window resizes.
             .column(Column::remainder().at_least(150.0).clip(true).resizable(false))
-            .columns(Column::initial(95.0).at_least(50.0), cols.len() - 1)
+            .columns(Column::initial(95.0).at_least(50.0), cols.len() - 2)
+            // The last column isn't resizable, so its right edge can't be grabbed by mistake instead of the scroll bar.
+            .column(Column::initial(95.0).at_least(50.0).resizable(false))
             .header(header_height, |mut header| {
                 for (col, title, tip) in &cols {
                     header.col(|ui| {
@@ -350,12 +352,16 @@ impl App {
                                 },
                             }
                             let arrow = sort_arrow(self.sort == *col, *col, self.alt);
-                            if ui.selectable_label(self.sort == *col, format!("{title}{arrow}")).on_hover_text(tip).clicked() {
+                            if ui.selectable_label(false, format!("{title}{arrow}")).on_hover_text(tip).clicked() {
                                 sort = Some(*col);
                             }
                         });
                         if cell.clicked() {
                             sort = Some(*col);
+                        }
+                        // Mark the sorted column with a white frame around its whole header, both rows.
+                        if self.sort == *col {
+                            ui.painter().rect_stroke(cell.rect, egui::CornerRadius::ZERO, egui::Stroke::new(1.0, egui::Color32::WHITE), egui::StrokeKind::Inside);
                         }
                     });
                 }
@@ -371,12 +377,6 @@ impl App {
                     row.col(|ui| {
                         // Hovering a row reveals buttons to end its program or process, on the right of its name.
                         let hovered = ui.rect_contains_pointer(ui.max_rect());
-                        if hovered {
-                            now_hovered = Some(match rows[index] {
-                                Row::Group(group) => group.name.to_owned(),
-                                Row::Proc(proc) => proc.name.clone(),
-                            });
-                        }
                         egui::containers::Sides::new().shrink_left().show(
                             ui,
                             |ui| match rows[index] {
@@ -431,6 +431,13 @@ impl App {
                                 paint_bar(ui, rect, (current / col_max[i]) as f32, BAR);
                             }
                             ui.with_layout(right, |ui| ui.label(col.text(usage)));
+                        });
+                    }
+                    // Hovering anywhere in the row highlights its share on the header bars.
+                    if row.response().hovered() {
+                        now_hovered = Some(match rows[index] {
+                            Row::Group(group) => group.name.to_owned(),
+                            Row::Proc(proc) => proc.name.clone(),
                         });
                     }
                     if let Some(group) = group
