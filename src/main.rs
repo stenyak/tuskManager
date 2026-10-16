@@ -21,6 +21,8 @@ const HISTORY: usize = 10;
 const WINDOW_KEY: &str = "window";
 /// The background bar behind each value and total.
 const BAR: egui::Color32 = egui::Color32::from_rgb(45, 75, 120);
+/// Half-transparent `BAR`, for the recent-peak bar behind the current one.
+const FAINT: egui::Color32 = egui::Color32::from_rgba_premultiplied(23, 38, 60, 128);
 const NAME_TIP: &str = "Processes grouped by executable. Click a program with several processes to list them.";
 const RAM_TIP: &str = "Physical memory that only this program uses, which ending it frees.";
 const COMMIT_TIP: &str = "Memory that only this program uses, also counting what was moved out of RAM to the page file or compressed memory. Its total is limited to RAM plus the page file.";
@@ -395,8 +397,14 @@ impl App {
                                 admin_prompt(ui, index, &mut relaunch);
                                 return;
                             }
-                            let fraction = if col_max[i] > 0.0 { (col.value(usage) / col_max[i]) as f32 } else { 0.0 };
-                            paint_bar(ui, ui.max_rect(), fraction);
+                            if col_max[i] > 0.0 {
+                                let rect = ui.max_rect();
+                                let current = col.value(usage);
+                                // A faint bar for the recent peak behind the solid bar for the current value; only programs keep a peak.
+                                let peak = group.map(|group| self.peak(group.name, *col)).unwrap_or(current).max(current);
+                                paint_bar(ui, rect, (peak / col_max[i]) as f32, FAINT);
+                                paint_bar(ui, rect, (current / col_max[i]) as f32, BAR);
+                            }
                             ui.with_layout(right, |ui| ui.label(col.text(usage)));
                         });
                     }
@@ -567,11 +575,11 @@ fn admin_prompt(ui: &mut egui::Ui, row: usize, relaunch: &mut bool) {
 }
 
 /// Fills the left part of a rectangle, flat, as a background bar behind a value.
-fn paint_bar(ui: &egui::Ui, rect: egui::Rect, fraction: f32) {
+fn paint_bar(ui: &egui::Ui, rect: egui::Rect, fraction: f32, color: egui::Color32) {
     let fraction = fraction.clamp(0.0, 1.0);
     if fraction > 0.0 {
         let filled = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width() * fraction, rect.height()));
-        ui.painter().rect_filled(filled, egui::CornerRadius::ZERO, BAR);
+        ui.painter().rect_filled(filled, egui::CornerRadius::ZERO, color);
     }
 }
 
@@ -579,7 +587,7 @@ fn paint_bar(ui: &egui::Ui, rect: egui::Rect, fraction: f32) {
 fn total_bar(ui: &mut egui::Ui, fraction: f32, text: String) {
     let height = ui.spacing().interact_size.y;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::hover());
-    paint_bar(ui, rect, fraction);
+    paint_bar(ui, rect, fraction, BAR);
     let font = egui::TextStyle::Button.resolve(ui.style());
     let at = rect.right_center() - egui::vec2(ui.spacing().item_spacing.x, 0.0);
     ui.painter().text(at, egui::Align2::RIGHT_CENTER, text, font, ui.visuals().text_color());
