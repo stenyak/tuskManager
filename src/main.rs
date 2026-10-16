@@ -219,7 +219,8 @@ impl App {
             // Cells laid out right to left grow their click area over the previous column, hiding its header button,
             // so only their contents are right-aligned.
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::remainder().at_least(150.0).clip(true))
+            // Only a remainder column that isn't resizable keeps filling the table as the window resizes.
+            .column(Column::remainder().at_least(150.0).clip(true).resizable(false))
             .columns(Column::initial(95.0).at_least(50.0), cols.len() - 1)
             .header(header_height, |mut header| {
                 for (col, title, tip) in &cols {
