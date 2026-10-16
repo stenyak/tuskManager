@@ -351,10 +351,9 @@ impl App {
                                     None => total_bar(ui, 0.0, 0.0, String::new()),
                                 },
                             }
+                            // Plain text, not a button: the whole header cell handles the click to sort.
                             let arrow = sort_arrow(self.sort == *col, *col, self.alt);
-                            if ui.selectable_label(false, format!("{title}{arrow}")).on_hover_text(tip).clicked() {
-                                sort = Some(*col);
-                            }
+                            ui.label(format!("{title}{arrow}")).on_hover_text(tip);
                         });
                         if cell.clicked() {
                             sort = Some(*col);
