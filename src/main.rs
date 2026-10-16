@@ -18,6 +18,8 @@ const NAME_TIP: &str = "Processes grouped by executable. Click a program with se
 const RAM_TIP: &str = "Physical memory that only this program uses, which ending it frees.";
 const COMMIT_TIP: &str = "Memory that only this program uses, also counting what was moved out of RAM to the page file, swap or compressed memory. Its total is limited to RAM plus page file or swap.";
 const CPU_TIP: &str = "Share of the time of all CPU cores, over the last second.";
+const DISK_TIP: &str = "Bytes per second this program read from and wrote to disk, over the last second.";
+const NET_TIP: &str = "Bytes per second this program sent and received, over the last second. Needs admin rights.";
 
 /// What a process uses, or all the processes of a program.
 #[derive(Default)]
@@ -30,6 +32,10 @@ pub struct Usage {
     pub vram: Vec<u64>,
     /// Share of the time of all CPU cores since the previous sample, in percent.
     pub cpu: f32,
+    /// Bytes per second read from and written to disk.
+    pub disk: u64,
+    /// Bytes per second sent and received over the network.
+    pub net: u64,
 }
 
 impl Usage {
@@ -41,6 +47,8 @@ impl Usage {
             *sum += vram;
         }
         self.cpu += other.cpu;
+        self.disk += other.disk;
+        self.net += other.net;
     }
 }
 
@@ -70,6 +78,10 @@ pub struct Sample {
     pub commit: Total,
     pub gpus: Vec<Gpu>,
     pub procs: Vec<Proc>,
+    /// Bytes per second over all network interfaces.
+    pub net: u64,
+    /// Whether the processes carry their own network use, which needs admin rights.
+    pub net_per_process: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -79,6 +91,8 @@ enum Col {
     Commit,
     Vram(usize),
     Cpu,
+    Disk,
+    Net,
 }
 
 impl Col {
@@ -90,6 +104,8 @@ impl Col {
             Col::Vram(gpu) => usage.vram.get(gpu).copied().unwrap_or(0) as f64,
             // As shown, for rows that show no CPU use to sort by name.
             Col::Cpu => (usage.cpu as f64 * 10.0).round() / 10.0,
+            Col::Disk => usage.disk as f64,
+            Col::Net => usage.net as f64,
         }
     }
 
@@ -97,9 +113,10 @@ impl Col {
     fn text(self, usage: &Usage) -> String {
         let value = self.value(usage);
         match self {
-            Col::Cpu if value > 0.0 => format!("{value:.1}%"),
-            Col::Ram | Col::Commit | Col::Vram(_) if value > 0.0 => size(value as u64),
-            _ => String::new(),
+            _ if value <= 0.0 => String::new(),
+            Col::Cpu => format!("{value:.1}%"),
+            Col::Disk | Col::Net => rate(value as u64),
+            _ => size(value as u64),
         }
     }
 
@@ -109,7 +126,7 @@ impl Col {
             Col::Ram => Some(&sample.ram),
             Col::Commit => Some(&sample.commit),
             Col::Vram(gpu) => sample.gpus.get(gpu).map(|gpu| &gpu.vram),
-            Col::Name | Col::Cpu => None,
+            _ => None,
         }
     }
 }
@@ -134,6 +151,8 @@ struct App {
     filter: String,
     /// The programs with their processes listed below them.
     expanded: HashSet<String>,
+    /// Whether to offer relaunching as admin, which per-process network needs.
+    offer_admin: bool,
 }
 
 impl App {
@@ -148,7 +167,7 @@ impl App {
                 std::thread::sleep(REFRESH);
             }
         });
-        Self { rx, sample: Sample::default(), sort: Col::Ram, descending: true, filter: String::new(), expanded: HashSet::new() }
+        Self { rx, sample: Sample::default(), sort: Col::Ram, descending: true, filter: String::new(), expanded: HashSet::new(), offer_admin: sampler::offer_admin() }
     }
 
     /// By the sorted column only, the caller breaks ties for rows to stay in place between samples.
@@ -192,6 +211,8 @@ impl App {
             cols.push((Col::Vram(i), vram_title(gpus, i), format!("Dedicated video memory that this program uses on the {}.", gpu.name)));
         }
         cols.push((Col::Cpu, "CPU".to_owned(), CPU_TIP.to_owned()));
+        cols.push((Col::Disk, "Disk".to_owned(), DISK_TIP.to_owned()));
+        cols.push((Col::Net, "Network".to_owned(), NET_TIP.to_owned()));
 
         let groups = self.groups(&self.sample.procs);
         let mut rows = Vec::new();
@@ -202,8 +223,9 @@ impl App {
             }
         }
         let cpu: f32 = self.sample.procs.iter().map(|proc| proc.usage.cpu).sum();
+        let disk: u64 = self.sample.procs.iter().map(|proc| proc.usage.disk).sum();
 
-        let (mut sort, mut toggle) = (None, None);
+        let (mut sort, mut toggle, mut relaunch) = (None, None, false);
         let height = ui.spacing().interact_size.y;
         // The titles, with the filter or the system-wide totals below them.
         let header_height = 2.0 * (height + ui.spacing().item_spacing.y);
@@ -236,11 +258,24 @@ impl App {
                                 sort = Some(*col);
                             }
                             match col {
+                                // The filter, with the button to see per-process network where the room is.
                                 Col::Name => {
-                                    ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter programs").desired_width(f32::INFINITY));
+                                    ui.with_layout(right, |ui| {
+                                        if self.offer_admin && ui.button("Run as admin").on_hover_text("Relaunch with admin rights to also see each program's network use").clicked() {
+                                            relaunch = true;
+                                        }
+                                        ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter programs").desired_width(ui.available_width()));
+                                    });
                                 }
                                 Col::Cpu => {
                                     bar(ui, cpu / 100.0, format!("{cpu:.0}%"));
+                                }
+                                // Rates have no capacity to fill a bar, so just the figure.
+                                Col::Disk => {
+                                    ui.label(rate(disk));
+                                }
+                                Col::Net => {
+                                    ui.label(rate(self.sample.net));
                                 }
                                 _ => {
                                     if let Some(total) = col.total(&self.sample).filter(|total| total.total > 0) {
@@ -300,6 +335,10 @@ impl App {
         {
             self.expanded.insert(name);
         }
+        if relaunch {
+            sampler::relaunch_as_admin();
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     }
 }
 
@@ -339,6 +378,20 @@ fn unit(bytes: u64) -> (f64, usize, &'static str) {
         mb if mb < 10.0 => (MB, 1, "MB"),
         mb if mb < 1000.0 => (MB, 0, "MB"),
         _ => (MB * 1024.0, 1, "GB"),
+    }
+}
+
+/// A transfer speed like "340 KB/s" or "12 MB/s", down to the kilobyte since idle rates are small.
+fn rate(bytes_per_sec: u64) -> String {
+    let kb = bytes_per_sec as f64 / 1024.0;
+    if kb < 1.0 {
+        String::new()
+    } else if kb < 1000.0 {
+        format!("{kb:.0} KB/s")
+    } else if kb < 1000.0 * 1024.0 {
+        format!("{:.1} MB/s", kb / 1024.0)
+    } else {
+        format!("{:.1} GB/s", kb / 1024.0 / 1024.0)
     }
 }
 

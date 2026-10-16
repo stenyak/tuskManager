@@ -1,8 +1,8 @@
 //! Usage from sysinfo, plus the private memory and video memory of each process where Linux exposes them.
 
 use crate::{Gpu, Proc, Sample, Total, Usage};
-use std::collections::HashMap;
-use sysinfo::{CpuRefreshKind, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+use std::{collections::HashMap, time::Instant};
+use sysinfo::{CpuRefreshKind, Networks, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 #[cfg(target_os = "linux")]
 use {
     nvml_wrapper::{Nvml, enums::device::UsedGpuMemory},
@@ -11,6 +11,8 @@ use {
 
 pub struct Sampler {
     system: System,
+    networks: Networks,
+    last: Instant,
     #[cfg(target_os = "linux")]
     nvml: Option<Nvml>,
 }
@@ -21,17 +23,22 @@ impl Sampler {
         system.refresh_cpu_list(CpuRefreshKind::nothing());
         Self {
             system,
+            networks: Networks::new_with_refreshed_list(),
+            last: Instant::now(),
             #[cfg(target_os = "linux")]
             nvml: Nvml::init().ok(),
         }
     }
 
     pub fn sample(&mut self) -> Sample {
-        let refresh = ProcessRefreshKind::nothing().with_cpu().with_memory().with_exe(UpdateKind::OnlyIfNotSet).without_tasks();
+        let secs = self.last.elapsed().as_secs_f64().max(0.001);
+        self.last = Instant::now();
+        let refresh = ProcessRefreshKind::nothing().with_cpu().with_memory().with_disk_usage().with_exe(UpdateKind::OnlyIfNotSet).without_tasks();
         self.system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
         self.system.refresh_memory();
+        self.networks.refresh(false);
         let (gpus, mut vram) = self.gpus();
-        // sysinfo gives the CPU use in percent of one core.
+        // sysinfo gives the CPU use in percent of one core, and the disk bytes since the previous sample.
         let cpus = self.system.cpus().len().max(1) as f32;
         let procs = self
             .system
@@ -43,14 +50,23 @@ impl Sampler {
                 let pid = process.pid().as_u32();
                 let name = process.exe().and_then(|exe| exe.file_name()).unwrap_or(process.name());
                 let (ram, commit) = private_memory(pid).unwrap_or((process.memory(), 0));
-                let usage = Usage { ram, commit, vram: vram.remove(&pid).unwrap_or_default(), cpu: process.cpu_usage() / cpus };
+                let io = process.disk_usage();
+                let usage = Usage {
+                    ram,
+                    commit,
+                    vram: vram.remove(&pid).unwrap_or_default(),
+                    cpu: process.cpu_usage() / cpus,
+                    disk: ((io.read_bytes + io.written_bytes) as f64 / secs) as u64,
+                    net: 0,
+                };
                 Proc { pid, name: name.to_string_lossy().into_owned(), usage }
             })
             .collect();
         let ram = Total { used: self.system.used_memory(), total: self.system.total_memory() };
         // There's no commit limit, swap is what extends RAM.
         let commit = Total { used: ram.used + self.system.used_swap(), total: ram.total + self.system.total_swap() };
-        Sample { ram, commit, gpus, procs }
+        let bytes: u64 = self.networks.list().values().map(|net| net.received() + net.transmitted()).sum();
+        Sample { ram, commit, gpus, procs, net: (bytes as f64 / secs) as u64, net_per_process: false }
     }
 
     /// Each GPU's use, and each process's use of each GPU by process id.
@@ -97,6 +113,13 @@ impl Sampler {
         Default::default()
     }
 }
+
+/// Only Windows offers per-process network by relaunching as admin.
+pub fn offer_admin() -> bool {
+    false
+}
+
+pub fn relaunch_as_admin() {}
 
 /// The RAM, and the RAM plus swap, that only the process uses: its anonymous memory.
 #[cfg(target_os = "linux")]
