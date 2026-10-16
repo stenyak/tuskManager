@@ -51,7 +51,7 @@ use windows::{
 #[repr(C)]
 struct ProcessInfo {
     next_entry_offset: u32,
-    _number_of_threads: u32,
+    number_of_threads: u32,
     working_set_private_size: u64,
     _hard_fault_count: u32,
     _number_of_threads_high_watermark: u32,
@@ -83,6 +83,25 @@ struct ProcessInfo {
     _other_operation_count: u64,
     read_transfer_count: u64,
     write_transfer_count: u64,
+    /// Kept so the struct's size matches the kernel's, placing the thread entries that follow it.
+    _other_transfer_count: u64,
+}
+
+/// The start of SYSTEM_THREAD_INFORMATION, the per-thread entries the kernel writes right after each process.
+#[repr(C)]
+struct ThreadInfo {
+    kernel_time: i64,
+    user_time: i64,
+    create_time: i64,
+    _wait_time: u32,
+    _start_address: usize,
+    _unique_process: usize,
+    unique_thread: usize,
+    _priority: i32,
+    _base_priority: i32,
+    _context_switches: u32,
+    _thread_state: u32,
+    _wait_reason: u32,
 }
 
 pub struct Sampler {
@@ -90,6 +109,8 @@ pub struct Sampler {
     buf: Vec<u64>,
     /// The previous totals of each process, by id and creation time since ids get reused.
     cpu_times: HashMap<(u32, i64), u64>,
+    /// The previous CPU total of each thread, to find the busiest one each sample.
+    thread_times: HashMap<(u32, i64), u64>,
     disk_bytes: HashMap<(u32, i64), u64>,
     gpus: Option<Gpus>,
     net: Option<NetTrace>,
@@ -106,6 +127,7 @@ impl Sampler {
         Self {
             buf: vec![0; 1 << 17],
             cpu_times: HashMap::new(),
+            thread_times: HashMap::new(),
             disk_bytes: HashMap::new(),
             gpus: None,
             net: None,
@@ -134,6 +156,7 @@ impl Sampler {
         let mut procs = Vec::new();
         let mut cpu_deltas = Vec::new();
         let mut cpu_times = HashMap::new();
+        let mut thread_times = HashMap::new();
         let mut disk_bytes = HashMap::new();
         // All CPU time goes to some process, idle time to the idle process with id 0,
         // so the deltas of all processes add up to the time that passed on all CPUs.
@@ -142,7 +165,8 @@ impl Sampler {
             let mut offset = 0;
             loop {
                 // SAFETY: the kernel wrote the entries back to back, each one at the offset that the previous one gives.
-                let info = unsafe { &*self.buf.as_ptr().cast::<u8>().add(offset).cast::<ProcessInfo>() };
+                let base = unsafe { self.buf.as_ptr().cast::<u8>().add(offset) };
+                let info = unsafe { &*base.cast::<ProcessInfo>() };
                 let pid = info.unique_process_id as u32;
                 let cpu_time = info.user_time + info.kernel_time;
                 let cpu_delta = delta(&self.cpu_times, (pid, info.create_time), cpu_time);
@@ -156,11 +180,23 @@ impl Sampler {
                     };
                     let io = info.read_transfer_count + info.write_transfer_count;
                     let net = net_now.as_ref().map(|now| rate(delta(&self.net_bytes, pid, now.get(&pid).copied().unwrap_or(0)), secs)).unwrap_or(0);
+                    // The busiest single thread, as a share of one core, reveals a core pegged by one thread even when the all-core share is low.
+                    let threads = unsafe { base.add(size_of::<ProcessInfo>()).cast::<ThreadInfo>() };
+                    let mut busiest = 0;
+                    for t in 0..info.number_of_threads as usize {
+                        // SAFETY: the kernel wrote number_of_threads entries right after the process.
+                        let thread = unsafe { &*threads.add(t) };
+                        let cpu = (thread.kernel_time + thread.user_time) as u64;
+                        let tid = thread.unique_thread as u32;
+                        busiest = busiest.max(delta(&self.thread_times, (tid, thread.create_time), cpu));
+                        thread_times.insert((tid, thread.create_time), cpu);
+                    }
                     let usage = Usage {
                         ram: info.working_set_private_size,
                         commit: info.pagefile_usage as u64,
                         vram: vram.remove(&pid).unwrap_or_default(),
                         cpu: 0.0,
+                        core: (busiest as f64 * 100.0 / (secs * 1e7)) as f32,
                         disk: rate(delta(&self.disk_bytes, (pid, info.create_time), io), secs),
                         net,
                     };
@@ -175,6 +211,7 @@ impl Sampler {
             }
         }
         self.cpu_times = cpu_times;
+        self.thread_times = thread_times;
         self.disk_bytes = disk_bytes;
         self.net_bytes = net_now.unwrap_or_default();
         for (proc, delta) in procs.iter_mut().zip(cpu_deltas) {

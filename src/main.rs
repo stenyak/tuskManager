@@ -29,6 +29,7 @@ const NAME_TIP: &str = "Processes grouped by executable. Click a program with se
 const RAM_TIP: &str = "Physical memory that only this program uses, which ending it frees.";
 const COMMIT_TIP: &str = "Memory that only this program uses, also counting what was moved out of RAM to the page file or compressed memory. Its total is limited to RAM plus the page file.";
 const CPU_TIP: &str = "Share of the time of all CPU cores, over the last second.";
+const CORE_TIP: &str = "The busiest single thread of this program, as a share of one CPU core over the last second. Near 100% means one core is maxed by a single thread, a bottleneck the all-core CPU share hides.";
 const DISK_TIP: &str = "Bytes per second this program read from and wrote to disk, over the last second.";
 const NET_TIP: &str = "Bytes per second this program sent and received, over the last second. Needs admin rights.";
 
@@ -43,6 +44,8 @@ pub struct Usage {
     pub vram: Vec<u64>,
     /// Share of the time of all CPU cores since the previous sample, in percent.
     pub cpu: f32,
+    /// Busiest single thread as a share of one core, in percent, so a pegged core shows near 100.
+    pub core: f32,
     /// Bytes per second read from and written to disk.
     pub disk: u64,
     /// Bytes per second sent and received over the network.
@@ -58,6 +61,8 @@ impl Usage {
             *sum += vram;
         }
         self.cpu += other.cpu;
+        // A group's core use is its busiest process's, not the sum, so one pegged core stays at about 100.
+        self.core = self.core.max(other.core);
         self.disk += other.disk;
         self.net += other.net;
     }
@@ -104,6 +109,7 @@ enum Col {
     Commit,
     Vram(usize),
     Cpu,
+    Core,
     Disk,
     Net,
 }
@@ -117,6 +123,7 @@ impl Col {
             Col::Vram(gpu) => usage.vram.get(gpu).copied().unwrap_or(0) as f64,
             // As shown, for rows that show no CPU use to sort by name.
             Col::Cpu => (usage.cpu as f64 * 10.0).round() / 10.0,
+            Col::Core => (usage.core as f64).round(),
             Col::Disk => usage.disk as f64,
             Col::Net => usage.net as f64,
         }
@@ -128,6 +135,7 @@ impl Col {
         match self {
             _ if value <= 0.0 => String::new(),
             Col::Cpu => format!("{value:.1}%"),
+            Col::Core => format!("{value:.0}%"),
             Col::Disk | Col::Net => rate(value as u64),
             _ => size(value as u64),
         }
@@ -280,6 +288,7 @@ impl App {
         let mut cols = vec![
             (Col::Name, "Program".to_owned(), NAME_TIP.to_owned()),
             (Col::Cpu, "CPU".to_owned(), CPU_TIP.to_owned()),
+            (Col::Core, "Core".to_owned(), CORE_TIP.to_owned()),
             (Col::Ram, "RAM".to_owned(), RAM_TIP.to_owned()),
             (Col::Commit, "Commit".to_owned(), COMMIT_TIP.to_owned()),
         ];
@@ -289,7 +298,8 @@ impl App {
         cols.push((Col::Disk, "Disk".to_owned(), DISK_TIP.to_owned()));
         cols.push((Col::Net, "Network".to_owned(), NET_TIP.to_owned()));
         // The biggest each column reached recently, to scale its background bars against.
-        let col_max: Vec<f64> = cols.iter().map(|(col, ..)| self.col_max(*col)).collect();
+        // Core scales against one whole core instead, so a near-full bar means a pegged core.
+        let col_max: Vec<f64> = cols.iter().map(|(col, ..)| if *col == Col::Core { 100.0 } else { self.col_max(*col) }).collect();
 
         let groups = self.groups(&self.sample.procs);
         let mut rows = Vec::new();
