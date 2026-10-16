@@ -307,6 +307,8 @@ impl App {
         ui.style_mut().interaction.selectable_labels = false;
         // A regular, always-present scroll bar rather than a thin overlay one.
         ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+        // The table's horizontal span, to detect hovering a whole row, not just its first cell.
+        let table_x = ui.max_rect().x_range();
         TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
@@ -374,8 +376,14 @@ impl App {
                     };
                     let mut acted = false;
                     row.col(|ui| {
-                        // Hovering a row reveals buttons to end its program or process, on the right of its name.
-                        let hovered = ui.rect_contains_pointer(ui.max_rect());
+                        // Hovering anywhere in the row (its full-width band) reveals the end buttons and highlights its header share.
+                        let hovered = ui.rect_contains_pointer(egui::Rect::from_x_y_ranges(table_x, ui.max_rect().y_range()));
+                        if hovered {
+                            now_hovered = Some(match rows[index] {
+                                Row::Group(group) => group.name.to_owned(),
+                                Row::Proc(proc) => proc.name.clone(),
+                            });
+                        }
                         egui::containers::Sides::new().shrink_left().show(
                             ui,
                             |ui| match rows[index] {
@@ -430,13 +438,6 @@ impl App {
                                 paint_bar(ui, rect, (current / col_max[i]) as f32, BAR);
                             }
                             ui.with_layout(right, |ui| ui.label(col.text(usage)));
-                        });
-                    }
-                    // Hovering anywhere in the row highlights its share on the header bars.
-                    if row.response().hovered() {
-                        now_hovered = Some(match rows[index] {
-                            Row::Group(group) => group.name.to_owned(),
-                            Row::Proc(proc) => proc.name.clone(),
                         });
                     }
                     if let Some(group) = group
