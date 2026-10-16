@@ -6,14 +6,18 @@ mod sampler;
 
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
+use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
     sync::mpsc,
     time::Duration,
 };
 
 const REFRESH: Duration = Duration::from_secs(1);
+/// The key eframe itself stores the window place under, which we reuse.
+const WINDOW_KEY: &str = "window";
 const NAME_TIP: &str = "Processes grouped by executable. Click a program with several processes to list them.";
 const RAM_TIP: &str = "Physical memory that only this program uses, which ending it frees.";
 const COMMIT_TIP: &str = "Memory that only this program uses, also counting what was moved out of RAM to the page file, swap or compressed memory. Its total is limited to RAM plus page file or swap.";
@@ -143,6 +147,17 @@ enum Row<'a> {
     Proc(&'a Proc),
 }
 
+/// eframe's own record of the window, which it clamps onto a connected monitor and shrinks to fit the largest one on start.
+/// The fields match eframe's internal `WindowSettings`, so we can keep the last normal place when quitting minimized or maximized.
+#[derive(Serialize, Deserialize, Clone, Copy)]
+struct WindowPlace {
+    inner_position_pixels: Option<egui::Pos2>,
+    outer_position_pixels: Option<egui::Pos2>,
+    fullscreen: bool,
+    maximized: bool,
+    inner_size_points: Option<egui::Vec2>,
+}
+
 struct App {
     rx: mpsc::Receiver<Sample>,
     sample: Sample,
@@ -153,6 +168,9 @@ struct App {
     expanded: HashSet<String>,
     /// Whether to offer relaunching as admin, which per-process network needs.
     offer_admin: bool,
+    ctx: egui::Context,
+    /// The last place the window was shown normally, kept across minimizing and maximizing.
+    window: Option<WindowPlace>,
 }
 
 impl App {
@@ -160,14 +178,27 @@ impl App {
         let (tx, rx) = mpsc::channel();
         let ctx = cc.egui_ctx.clone();
         // Sampling takes a moment, which would stall the UI.
-        std::thread::spawn(move || {
-            let mut sampler = sampler::Sampler::new();
-            while tx.send(sampler.sample()).is_ok() {
-                ctx.request_repaint();
-                std::thread::sleep(REFRESH);
+        std::thread::spawn({
+            let ctx = ctx.clone();
+            move || {
+                let mut sampler = sampler::Sampler::new();
+                while tx.send(sampler.sample()).is_ok() {
+                    ctx.request_repaint();
+                    std::thread::sleep(REFRESH);
+                }
             }
         });
-        Self { rx, sample: Sample::default(), sort: Col::Ram, descending: true, filter: String::new(), expanded: HashSet::new(), offer_admin: sampler::offer_admin() }
+        Self {
+            rx,
+            sample: Sample::default(),
+            sort: Col::Ram,
+            descending: true,
+            filter: String::new(),
+            expanded: HashSet::new(),
+            offer_admin: sampler::offer_admin(),
+            window: cc.storage.and_then(|storage| eframe::get_value(storage, WINDOW_KEY)),
+            ctx,
+        }
     }
 
     /// By the sorted column only, the caller breaks ties for rows to stay in place between samples.
@@ -343,6 +374,28 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// Only the window place is kept, in window.ron, not the egui memory.
+    fn persist_egui_memory(&self) -> bool {
+        false
+    }
+
+    /// A window minimized at exit has no size and sits off screen, and a maximized one is the size of the screen,
+    /// so both keep the place from the last time the window was shown normally.
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        let minimized = self.ctx.input(|i| i.viewport().minimized == Some(true));
+        if let Some(now) = eframe::get_value::<WindowPlace>(storage, WINDOW_KEY).filter(|_| !minimized) {
+            self.window = Some(match self.window {
+                Some(normal) if now.maximized || now.fullscreen => WindowPlace { maximized: now.maximized, fullscreen: now.fullscreen, ..normal },
+                _ => now,
+            });
+        }
+        match &self.window {
+            Some(window) => eframe::set_value(storage, WINDOW_KEY, window),
+            // Never shown normally yet: saved unreadable, for the next start to use the default window.
+            None => storage.set_string(WINDOW_KEY, String::new()),
+        }
+    }
+
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if let Some(sample) = self.rx.try_iter().last() {
             self.sample = sample;
@@ -411,9 +464,15 @@ fn bar(ui: &mut egui::Ui, fraction: f32, text: String) -> egui::Response {
     ui.add(egui::ProgressBar::new(fraction).text(text).desired_width(width.max(ui.available_width())))
 }
 
+fn exe_dir() -> PathBuf {
+    std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf)).unwrap_or_default()
+}
+
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([950.0, 750.0]),
+        // Without a path eframe keeps its window record in the user's app data; here it sits next to the exe.
+        persistence_path: Some(exe_dir().join("data").join("window.ron")),
         ..Default::default()
     };
     eframe::run_native("tuskManager", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
