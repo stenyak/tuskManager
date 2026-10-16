@@ -27,6 +27,8 @@ const FAINT: egui::Color32 = egui::Color32::from_rgba_premultiplied(23, 38, 60, 
 const HILITE: egui::Color32 = egui::Color32::from_rgb(222, 140, 51);
 /// A CPU core running hot, over 90%, on the per-core header graph.
 const HOT: egui::Color32 = egui::Color32::from_rgb(170, 60, 55);
+/// The per-core header bars, brighter than `BAR` so the thin bars on many-core CPUs stay legible.
+const CORE_BAR: egui::Color32 = egui::Color32::from_rgb(90, 140, 210);
 const NAME_TIP: &str = "Processes grouped by executable. Click a program with several processes to list them.";
 const RAM_TIP: &str = "Physical memory that only this program uses, which ending it frees.";
 const COMMIT_TIP: &str = "Memory that only this program uses, also counting what was moved out of RAM to the page file or compressed memory. Its total is limited to RAM plus the page file.";
@@ -671,10 +673,11 @@ fn core_bars(ui: &mut egui::Ui, cores: &[f32], text: String) {
     let step = bars_width / cores.len().max(1) as f32;
     for (i, &usage) in cores.iter().enumerate() {
         let fraction = (usage / 100.0).clamp(0.0, 1.0);
-        let x = rect.left() + i as f32 * step;
-        // A hair of space between bars where they are wide enough to tell apart.
-        let bar = egui::Rect::from_min_max(egui::pos2(x, rect.bottom() - rect.height() * fraction), egui::pos2(x + (step - 1.0).max(1.0), rect.bottom()));
-        ui.painter().rect_filled(bar, egui::CornerRadius::ZERO, if usage > 90.0 { HOT } else { BAR });
+        // Bars touch edge to edge, each ending where the next begins, so a dense many-core CPU still reads clearly.
+        let x0 = rect.left() + i as f32 * step;
+        let x1 = rect.left() + (i + 1) as f32 * step;
+        let bar = egui::Rect::from_min_max(egui::pos2(x0, rect.bottom() - rect.height() * fraction), egui::pos2(x1, rect.bottom()));
+        ui.painter().rect_filled(bar, egui::CornerRadius::ZERO, if usage > 90.0 { HOT } else { CORE_BAR });
     }
 }
 
