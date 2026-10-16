@@ -19,6 +19,8 @@ const REFRESH: Duration = Duration::from_secs(1);
 const HISTORY: usize = 10;
 /// The key eframe itself stores the window place under, which we reuse.
 const WINDOW_KEY: &str = "window";
+/// Where the last sorted column and its order are kept across runs.
+const SORT_KEY: &str = "sort";
 /// The background bar behind each value and total.
 const BAR: egui::Color32 = egui::Color32::from_rgb(45, 75, 120);
 /// Half-transparent `BAR`, for the recent-peak bar behind the current one.
@@ -108,7 +110,7 @@ pub struct Sample {
     pub cores: Vec<f32>,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 enum Col {
     Name,
     Ram,
@@ -226,11 +228,13 @@ impl App {
                 }
             }
         });
+        // Restore the last sorted column and its order, else the default of RAM by recent peak.
+        let (sort, alt) = cc.storage.and_then(|storage| eframe::get_value::<(Col, bool)>(storage, SORT_KEY)).unwrap_or((Col::Ram, true));
         Self {
             rx,
             sample: Sample::default(),
-            sort: Col::Ram,
-            alt: true,
+            sort,
+            alt,
             filter: String::new(),
             expanded: HashSet::new(),
             hovered: None,
@@ -523,6 +527,7 @@ impl eframe::App for App {
             // Never shown normally yet: saved unreadable, for the next start to use the default window.
             None => storage.set_string(WINDOW_KEY, String::new()),
         }
+        eframe::set_value(storage, SORT_KEY, &(self.sort, self.alt));
     }
 
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
