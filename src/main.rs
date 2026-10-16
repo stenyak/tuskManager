@@ -310,6 +310,8 @@ impl App {
             .header(header_height, |mut header| {
                 for (col, title, tip) in &cols {
                     header.col(|ui| {
+                        // A click anywhere in the header cell sorts; added first so the search box and title on top still get their own clicks.
+                        let cell = ui.interact(ui.max_rect(), ui.id().with("sort"), egui::Sense::click());
                         let align = if *col == Col::Name { egui::Align::Min } else { egui::Align::Max };
                         ui.with_layout(egui::Layout::top_down(align), |ui| {
                             // The totals, or the filter, above the title.
@@ -331,6 +333,9 @@ impl App {
                                 sort = Some(*col);
                             }
                         });
+                        if cell.clicked() {
+                            sort = Some(*col);
+                        }
                     });
                 }
             })
