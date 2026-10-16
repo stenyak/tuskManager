@@ -183,6 +183,8 @@ impl App {
     fn new(cc: &eframe::CreationContext) -> Self {
         let (tx, rx) = mpsc::channel();
         let ctx = cc.egui_ctx.clone();
+        // Near-white text, brighter than egui's default gray, so the dense numbers read clearly.
+        ctx.all_styles_mut(|style| style.visuals.override_text_color = Some(egui::Color32::from_gray(235)));
         // Sampling takes a moment, which would stall the UI.
         std::thread::spawn({
             let ctx = ctx.clone();
