@@ -1,0 +1,17 @@
+[package]
+name = "tuskManager"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui_extras = { version = "0.36.2", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Wdk_System_SystemInformation", "Win32_Graphics_Dxgi", "Win32_System_Performance", "Win32_System_SystemInformation"] }
+
+[target.'cfg(not(windows))'.dependencies]
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nvml-wrapper = "0.13.0"
