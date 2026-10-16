@@ -18,7 +18,7 @@ const REFRESH: Duration = Duration::from_secs(1);
 const WINDOW_KEY: &str = "window";
 const NAME_TIP: &str = "Processes grouped by executable. Click a program with several processes to list them.";
 const RAM_TIP: &str = "Physical memory that only this program uses, which ending it frees.";
-const COMMIT_TIP: &str = "Memory that only this program uses, also counting what was moved out of RAM to the page file, swap or compressed memory. Its total is limited to RAM plus page file or swap.";
+const COMMIT_TIP: &str = "Memory that only this program uses, also counting what was moved out of RAM to the page file or compressed memory. Its total is limited to RAM plus the page file.";
 const CPU_TIP: &str = "Share of the time of all CPU cores, over the last second.";
 const DISK_TIP: &str = "Bytes per second this program read from and wrote to disk, over the last second.";
 const NET_TIP: &str = "Bytes per second this program sent and received, over the last second. Needs admin rights.";
@@ -76,7 +76,7 @@ pub struct Gpu {
 #[derive(Default)]
 pub struct Sample {
     pub ram: Total,
-    /// The commit charge against its limit, or RAM plus swap.
+    /// The commit charge against its limit.
     pub commit: Total,
     pub gpus: Vec<Gpu>,
     pub procs: Vec<Proc>,
