@@ -309,14 +309,8 @@ impl App {
                         ui.with_layout(egui::Layout::top_down(align), |ui| {
                             // The totals, or the filter, above the title.
                             match col {
-                                // The filter, with the button to see per-process network where the room is.
                                 Col::Name => {
-                                    ui.with_layout(right, |ui| {
-                                        if self.offer_admin && ui.button("Run as admin").on_hover_text("Relaunch with admin rights to also see each program's network use").clicked() {
-                                            relaunch = true;
-                                        }
-                                        ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter programs").desired_width(ui.available_width()));
-                                    });
+                                    ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Search").desired_width(ui.available_width()));
                                 }
                                 Col::Cpu => total_bar(ui, cpu / 100.0, format!("{cpu:.0}%")),
                                 // Rates have no capacity, so just the figure.
@@ -361,6 +355,11 @@ impl App {
                     });
                     for (i, (col, ..)) in cols.iter().enumerate().skip(1) {
                         row.col(|ui| {
+                            // The Network column is empty without admin rights, so the prompt to get them goes there.
+                            if *col == Col::Net && self.offer_admin {
+                                admin_prompt(ui, index, &mut relaunch);
+                                return;
+                            }
                             let fraction = if col_max[i] > 0.0 { (col.value(usage) / col_max[i]) as f32 } else { 0.0 };
                             paint_bar(ui, ui.max_rect(), fraction);
                             ui.with_layout(right, |ui| ui.label(col.text(usage)));
@@ -482,6 +481,29 @@ fn vram_title(gpus: &[Gpu], gpu: usize) -> String {
     }
     let vendor = gpus[gpu].name.split_whitespace().next().unwrap_or_default();
     format!("VRAM {}", vendor.replace("(R)", "").replace("(TM)", ""))
+}
+
+/// One centered, dim line of the Network-column admin prompt.
+fn prompt_line(ui: &mut egui::Ui, text: &str) {
+    ui.vertical_centered(|ui| ui.label(egui::RichText::new(text).weak()));
+}
+
+/// The admin prompt spread down the Network cells, which are empty without admin rights, with the button to relaunch elevated.
+fn admin_prompt(ui: &mut egui::Ui, row: usize, relaunch: &mut bool) {
+    match row {
+        // A couple of empty cells at the top, then the message split across cells, then the button.
+        2 => prompt_line(ui, "Admin"),
+        3 => prompt_line(ui, "needed for"),
+        4 => prompt_line(ui, "network"),
+        5 => {
+            ui.vertical_centered(|ui| {
+                if ui.button("Run as admin").on_hover_text("Relaunch with admin rights to show each program's network use").clicked() {
+                    *relaunch = true;
+                }
+            });
+        }
+        _ => {}
+    }
 }
 
 /// Fills the left part of a rectangle, flat, as a background bar behind a value.
