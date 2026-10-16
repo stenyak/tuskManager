@@ -387,9 +387,11 @@ impl App {
                         if cell.clicked() {
                             sort = Some(*col);
                         }
-                        // Mark the sorted column with a white frame around its whole header, both rows.
+                        // Mark the sorted column with a white frame around its whole header, both rows,
+                        // grown by half the cell spacing so it reaches the column dividers, like the table's own gapless fills.
                         if self.sort == *col {
-                            ui.painter().rect_stroke(cell.rect, egui::CornerRadius::ZERO, egui::Stroke::new(1.0, egui::Color32::WHITE), egui::StrokeKind::Inside);
+                            let frame = cell.rect.expand2(0.5 * ui.spacing().item_spacing);
+                            ui.painter().rect_stroke(frame, egui::CornerRadius::ZERO, egui::Stroke::new(1.0, egui::Color32::WHITE), egui::StrokeKind::Middle);
                         }
                     });
                 }
