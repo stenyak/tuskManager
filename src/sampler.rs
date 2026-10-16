@@ -97,6 +97,7 @@ pub struct Sampler {
     net_bytes: HashMap<u32, u64>,
     /// The previous bytes over all network interfaces.
     iface_bytes: Option<u64>,
+    prepared: bool,
     last: Instant,
 }
 
@@ -106,11 +107,22 @@ impl Sampler {
             buf: vec![0; 1 << 17],
             cpu_times: HashMap::new(),
             disk_bytes: HashMap::new(),
-            gpus: Gpus::new(),
-            net: NetTrace::new(),
+            gpus: None,
+            net: None,
             net_bytes: HashMap::new(),
             iface_bytes: None,
+            prepared: false,
             last: Instant::now(),
+        }
+    }
+
+    /// Sets up the GPU counters and the network trace, which together take about 200 ms, once.
+    /// Called after the first sample so the process list, memory and CPU show without that wait.
+    pub fn prepare(&mut self) {
+        if !self.prepared {
+            self.gpus = Gpus::new();
+            self.net = NetTrace::new();
+            self.prepared = true;
         }
     }
 

@@ -200,8 +200,14 @@ impl App {
             let ctx = ctx.clone();
             move || {
                 let mut sampler = sampler::Sampler::new();
-                while tx.send(sampler.sample()).is_ok() {
+                loop {
+                    let sample = sampler.sample();
+                    if tx.send(sample).is_err() {
+                        break;
+                    }
                     ctx.request_repaint();
+                    // GPU and network setup is slow, so do it after the first sample so the core data shows at once.
+                    sampler.prepare();
                     std::thread::sleep(REFRESH);
                 }
             }
