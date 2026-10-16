@@ -3,19 +3,24 @@
 mod sampler;
 
 use eframe::egui;
+use egui::scroll_area::ScrollBarVisibility;
 use egui_extras::{Column, TableBuilder};
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::mpsc,
     time::Duration,
 };
 
 const REFRESH: Duration = Duration::from_secs(1);
+/// How many recent samples the background bars scale against and the peak sort looks back over.
+const HISTORY: usize = 10;
 /// The key eframe itself stores the window place under, which we reuse.
 const WINDOW_KEY: &str = "window";
+/// The background bar behind each value and total.
+const BAR: egui::Color32 = egui::Color32::from_rgb(45, 75, 120);
 const NAME_TIP: &str = "Processes grouped by executable. Click a program with several processes to list them.";
 const RAM_TIP: &str = "Physical memory that only this program uses, which ending it frees.";
 const COMMIT_TIP: &str = "Memory that only this program uses, also counting what was moved out of RAM to the page file or compressed memory. Its total is limited to RAM plus the page file.";
@@ -160,10 +165,13 @@ struct App {
     rx: mpsc::Receiver<Sample>,
     sample: Sample,
     sort: Col,
-    descending: bool,
+    /// The second sort mode of the sorted column: Z to A for names, or by recent peak for values.
+    alt: bool,
     filter: String,
     /// The programs with their processes listed below them.
     expanded: HashSet<String>,
+    /// The recent per-program usage, newest last, for the background bars and the peak sort.
+    history: VecDeque<HashMap<String, Usage>>,
     /// Whether to offer relaunching as admin, which per-process network needs.
     offer_admin: bool,
     ctx: egui::Context,
@@ -190,26 +198,39 @@ impl App {
             rx,
             sample: Sample::default(),
             sort: Col::Ram,
-            descending: true,
+            alt: false,
             filter: String::new(),
             expanded: HashSet::new(),
+            history: VecDeque::new(),
             offer_admin: sampler::offer_admin(),
             window: cc.storage.and_then(|storage| eframe::get_value(storage, WINDOW_KEY)),
             ctx,
         }
     }
 
-    /// By the sorted column only, the caller breaks ties for rows to stay in place between samples.
-    fn order(&self, (a_name, a): (&str, &Usage), (b_name, b): (&str, &Usage)) -> Ordering {
-        let order = match self.sort {
-            Col::Name => by_name(a_name, b_name),
-            col => col.value(a).total_cmp(&col.value(b)),
-        };
-        if self.descending {
-            order.reverse()
-        } else {
-            order
+    /// The largest value a column reached over the recent history, which the background bars scale against,
+    /// so a brief spike doesn't rescale everything for just one frame.
+    fn col_max(&self, col: Col) -> f64 {
+        self.history.iter().flat_map(|snapshot| snapshot.values()).map(|usage| col.value(usage)).fold(0.0, f64::max)
+    }
+
+    /// A program's largest value in a column over the recent history, so a brief spike keeps it near the top.
+    fn peak(&self, name: &str, col: Col) -> f64 {
+        self.history.iter().filter_map(|snapshot| snapshot.get(name)).map(|usage| col.value(usage)).fold(0.0, f64::max)
+    }
+
+    /// Orders two programs by the sorted column: by name, by current value, or by recent peak in its alternate mode.
+    fn order(&self, a: &Group, b: &Group) -> Ordering {
+        if self.sort == Col::Name {
+            let order = by_name(a.name, b.name);
+            return if self.alt { order.reverse() } else { order };
         }
+        let (a_value, b_value) = if self.alt {
+            (self.peak(a.name, self.sort), self.peak(b.name, self.sort))
+        } else {
+            (self.sort.value(&a.usage), self.sort.value(&b.usage))
+        };
+        b_value.total_cmp(&a_value).then_with(|| by_name(a.name, b.name))
     }
 
     /// Only borrows the processes, for the filter to stay editable while the groups are shown.
@@ -223,9 +244,14 @@ impl App {
         }
         let mut groups: Vec<_> = groups.into_values().collect();
         for group in &mut groups {
-            group.procs.sort_by(|a, b| self.order((&a.name, &a.usage), (&b.name, &b.usage)).then(a.pid.cmp(&b.pid)));
+            // Within a program, always by the current value, since peaks are tracked per program only.
+            let order = |a: &&Proc, b: &&Proc| match self.sort {
+                Col::Name => Ordering::Equal,
+                col => col.value(&b.usage).total_cmp(&col.value(&a.usage)),
+            };
+            group.procs.sort_by(|a, b| order(a, b).then(a.pid.cmp(&b.pid)));
         }
-        groups.sort_by(|a, b| self.order((a.name, &a.usage), (b.name, &b.usage)).then_with(|| by_name(a.name, b.name)));
+        groups.sort_by(|a, b| self.order(a, b));
         groups
     }
 
@@ -242,6 +268,8 @@ impl App {
         cols.push((Col::Cpu, "CPU".to_owned(), CPU_TIP.to_owned()));
         cols.push((Col::Disk, "Disk".to_owned(), DISK_TIP.to_owned()));
         cols.push((Col::Net, "Network".to_owned(), NET_TIP.to_owned()));
+        // The biggest each column reached recently, to scale its background bars against.
+        let col_max: Vec<f64> = cols.iter().map(|(col, ..)| self.col_max(*col)).collect();
 
         let groups = self.groups(&self.sample.procs);
         let mut rows = Vec::new();
@@ -256,19 +284,18 @@ impl App {
 
         let (mut sort, mut toggle, mut relaunch) = (None, None, false);
         let height = ui.spacing().interact_size.y;
-        // The titles, with the filter or the system-wide totals below them.
+        // The totals or filter on top, the sortable title below.
         let header_height = 2.0 * (height + ui.spacing().item_spacing.y);
         let right = egui::Layout::right_to_left(egui::Align::Center);
         // Selectable text would take the clicks on the rows.
         ui.style_mut().interaction.selectable_labels = false;
-        // A floating scroll bar would cover the last column.
+        // A regular, always-present scroll bar rather than a thin overlay one.
         ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
         TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
             .sense(egui::Sense::click())
-            // Cells laid out right to left grow their click area over the previous column, hiding its header button,
-            // so only their contents are right-aligned.
+            .scroll_bar_visibility(ScrollBarVisibility::AlwaysVisible)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             // Only a remainder column that isn't resizable keeps filling the table as the window resizes.
             .column(Column::remainder().at_least(150.0).clip(true).resizable(false))
@@ -276,16 +303,9 @@ impl App {
             .header(header_height, |mut header| {
                 for (col, title, tip) in &cols {
                     header.col(|ui| {
-                        let arrow = match (self.sort == *col, self.descending) {
-                            (false, _) => "",
-                            (true, true) => " ⏷",
-                            (true, false) => " ⏶",
-                        };
                         let align = if *col == Col::Name { egui::Align::Min } else { egui::Align::Max };
                         ui.with_layout(egui::Layout::top_down(align), |ui| {
-                            if ui.selectable_label(self.sort == *col, format!("{title}{arrow}")).on_hover_text(tip).clicked() {
-                                sort = Some(*col);
-                            }
+                            // The totals, or the filter, above the title.
                             match col {
                                 // The filter, with the button to see per-process network where the room is.
                                 Col::Name => {
@@ -296,21 +316,18 @@ impl App {
                                         ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter programs").desired_width(ui.available_width()));
                                     });
                                 }
-                                Col::Cpu => {
-                                    bar(ui, cpu / 100.0, format!("{cpu:.0}%"));
-                                }
-                                // Rates have no capacity to fill a bar, so just the figure.
-                                Col::Disk => {
-                                    ui.label(rate(disk));
-                                }
-                                Col::Net => {
-                                    ui.label(rate(self.sample.net));
-                                }
-                                _ => {
-                                    if let Some(total) = col.total(&self.sample).filter(|total| total.total > 0) {
-                                        bar(ui, total.used as f32 / total.total as f32, used_of(total));
-                                    }
-                                }
+                                Col::Cpu => total_bar(ui, cpu / 100.0, format!("{cpu:.0}%")),
+                                // Rates have no capacity, so just the figure.
+                                Col::Disk => total_bar(ui, 0.0, rate(disk)),
+                                Col::Net => total_bar(ui, 0.0, rate(self.sample.net)),
+                                _ => match col.total(&self.sample).filter(|total| total.total > 0) {
+                                    Some(total) => total_bar(ui, total.used as f32 / total.total as f32, used_of(total)),
+                                    None => total_bar(ui, 0.0, String::new()),
+                                },
+                            }
+                            let arrow = sort_arrow(self.sort == *col, *col, self.alt);
+                            if ui.selectable_label(self.sort == *col, format!("{title}{arrow}")).on_hover_text(tip).clicked() {
+                                sort = Some(*col);
                             }
                         });
                     });
@@ -340,8 +357,10 @@ impl App {
                             ui.label(egui::RichText::new(format!("PID {}", proc.pid)).weak());
                         }
                     });
-                    for (col, ..) in &cols[1..] {
+                    for (i, (col, ..)) in cols.iter().enumerate().skip(1) {
                         row.col(|ui| {
+                            let fraction = if col_max[i] > 0.0 { (col.value(usage) / col_max[i]) as f32 } else { 0.0 };
+                            paint_bar(ui, ui.max_rect(), fraction);
                             ui.with_layout(right, |ui| ui.label(col.text(usage)));
                         });
                     }
@@ -355,8 +374,8 @@ impl App {
             });
 
         if let Some(col) = sort {
-            // Names read best from A to Z, amounts from the biggest.
-            self.descending = if col == self.sort { !self.descending } else { col != Col::Name };
+            // Clicking the sorted column again flips to its alternate mode; a new column starts in its main mode.
+            self.alt = if col == self.sort { !self.alt } else { false };
             self.sort = col;
         }
         if let Some(name) = toggle
@@ -397,6 +416,14 @@ impl eframe::App for App {
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if let Some(sample) = self.rx.try_iter().last() {
             self.sample = sample;
+            let mut snapshot: HashMap<String, Usage> = HashMap::new();
+            for proc in &self.sample.procs {
+                snapshot.entry(proc.name.clone()).or_default().add(&proc.usage);
+            }
+            self.history.push_back(snapshot);
+            while self.history.len() > HISTORY {
+                self.history.pop_front();
+            }
         }
     }
 
@@ -455,11 +482,34 @@ fn vram_title(gpus: &[Gpu], gpu: usize) -> String {
     format!("VRAM {}", vendor.replace("(R)", "").replace("(TM)", ""))
 }
 
-/// A bar with its text inside, filling the column, which widens if the text needs it.
-fn bar(ui: &mut egui::Ui, fraction: f32, text: String) -> egui::Response {
+/// Fills the left part of a rectangle, flat, as a background bar behind a value.
+fn paint_bar(ui: &egui::Ui, rect: egui::Rect, fraction: f32) {
+    let fraction = fraction.clamp(0.0, 1.0);
+    if fraction > 0.0 {
+        let filled = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width() * fraction, rect.height()));
+        ui.painter().rect_filled(filled, egui::CornerRadius::ZERO, BAR);
+    }
+}
+
+/// A full-width total: a flat background bar with its figure right-aligned on top.
+fn total_bar(ui: &mut egui::Ui, fraction: f32, text: String) {
+    let height = ui.spacing().interact_size.y;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::hover());
+    paint_bar(ui, rect, fraction);
     let font = egui::TextStyle::Button.resolve(ui.style());
-    let width = ui.painter().layout_no_wrap(text.clone(), font, egui::Color32::PLACEHOLDER).size().x + 2.0 * ui.spacing().item_spacing.x;
-    ui.add(egui::ProgressBar::new(fraction).text(text).desired_width(width.max(ui.available_width())))
+    let at = rect.right_center() - egui::vec2(ui.spacing().item_spacing.x, 0.0);
+    ui.painter().text(at, egui::Align2::RIGHT_CENTER, text, font, ui.visuals().text_color());
+}
+
+/// The marker on the sorted column's title: up for names A to Z, down otherwise, with the recent-peak mode noted.
+fn sort_arrow(sorted: bool, col: Col, alt: bool) -> &'static str {
+    match (sorted, col, alt) {
+        (false, ..) => "",
+        (true, Col::Name, false) => " ⏶",
+        (true, Col::Name, true) => " ⏷",
+        (true, _, false) => " ⏷",
+        (true, _, true) => " ⏷10s",
+    }
 }
 
 fn exe_dir() -> PathBuf {
