@@ -25,6 +25,8 @@ const BAR: egui::Color32 = egui::Color32::from_rgb(45, 75, 120);
 const FAINT: egui::Color32 = egui::Color32::from_rgba_premultiplied(23, 38, 60, 128);
 /// The hovered program's share of a total, on the header bars.
 const HILITE: egui::Color32 = egui::Color32::from_rgb(222, 140, 51);
+/// A CPU core running hot, over 90%, on the per-core header graph.
+const HOT: egui::Color32 = egui::Color32::from_rgb(170, 60, 55);
 const NAME_TIP: &str = "Processes grouped by executable. Click a program with several processes to list them.";
 const RAM_TIP: &str = "Physical memory that only this program uses, which ending it frees.";
 const COMMIT_TIP: &str = "Memory that only this program uses, also counting what was moved out of RAM to the page file or compressed memory. Its total is limited to RAM plus the page file.";
@@ -100,6 +102,8 @@ pub struct Sample {
     pub net: u64,
     /// Whether the processes carry their own network use, which needs admin rights.
     pub net_per_process: bool,
+    /// The busy share of each CPU core, in percent.
+    pub cores: Vec<f32>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -351,6 +355,13 @@ impl App {
                                 Col::Cpu => {
                                     let contrib = hovered_usage.map(|usage| usage.cpu / 100.0).unwrap_or(0.0);
                                     total_bar(ui, cpu / 100.0, contrib, format!("{cpu:.0}%"));
+                                }
+                                // A small bar per core, the busiest core's figure on top.
+                                Col::Core => {
+                                    let cores = &self.sample.cores;
+                                    let max = cores.iter().copied().fold(0.0_f32, f32::max);
+                                    let text = if cores.is_empty() { String::new() } else { format!("{max:.0}%") };
+                                    core_bars(ui, cores, text);
                                 }
                                 // Rates have no capacity, so the bar (the current total split by program) only appears while hovering.
                                 Col::Disk => {
@@ -641,6 +652,28 @@ fn total_bar(ui: &mut egui::Ui, used: f32, contrib: f32, text: String) {
     let font = egui::TextStyle::Button.resolve(ui.style());
     let at = rect.right_center() - egui::vec2(ui.spacing().item_spacing.x, 0.0);
     ui.painter().text(at, egui::Align2::RIGHT_CENTER, text, font, ui.visuals().text_color());
+}
+
+/// A small vertical bar per CPU core across the header, hot cores in red, with the busiest core's figure on the right.
+fn core_bars(ui: &mut egui::Ui, cores: &[f32], text: String) {
+    let height = ui.spacing().interact_size.y;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::hover());
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let color = ui.visuals().text_color();
+    let gap = ui.spacing().item_spacing.x;
+    // Place the figure right-aligned and keep the bars clear of it.
+    let galley = ui.painter().layout_no_wrap(text, font, color);
+    let text_width = galley.size().x;
+    ui.painter().galley(egui::pos2(rect.right() - gap - text_width, rect.center().y - galley.size().y / 2.0), galley, color);
+    let bars_width = (rect.width() - text_width - 2.0 * gap).max(0.0);
+    let step = bars_width / cores.len().max(1) as f32;
+    for (i, &usage) in cores.iter().enumerate() {
+        let fraction = (usage / 100.0).clamp(0.0, 1.0);
+        let x = rect.left() + i as f32 * step;
+        // A hair of space between bars where they are wide enough to tell apart.
+        let bar = egui::Rect::from_min_max(egui::pos2(x, rect.bottom() - rect.height() * fraction), egui::pos2(x + (step - 1.0).max(1.0), rect.bottom()));
+        ui.painter().rect_filled(bar, egui::CornerRadius::ZERO, if usage > 90.0 { HOT } else { BAR });
+    }
 }
 
 /// The marker on the sorted column's title: up for names A to Z, down otherwise, with the recent-peak mode noted.

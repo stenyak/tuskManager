@@ -14,7 +14,7 @@ use std::{
     time::Instant,
 };
 use windows::{
-    Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemProcessInformation},
+    Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemProcessInformation, SystemProcessorPerformanceInformation},
     Win32::{
         Foundation::{CloseHandle, ERROR_ACCESS_DENIED, ERROR_SUCCESS, FALSE, HANDLE, HWND, LPARAM, POINT, RECT, STATUS_INFO_LENGTH_MISMATCH, TRUE, UNICODE_STRING},
         Graphics::{
@@ -38,6 +38,7 @@ use windows::{
             },
             SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX},
             Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_TERMINATE, TerminateProcess},
+            WindowsProgramming::SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION,
         },
         UI::{
             Shell::ShellExecuteW,
@@ -111,6 +112,8 @@ pub struct Sampler {
     cpu_times: HashMap<(u32, i64), u64>,
     /// The previous CPU total of each thread, to find the busiest one each sample.
     thread_times: HashMap<(u32, i64), u64>,
+    /// The previous idle, kernel and user times of each CPU core, for its usage.
+    core_times: Vec<(u64, u64, u64)>,
     disk_bytes: HashMap<(u32, i64), u64>,
     gpus: Option<Gpus>,
     net: Option<NetTrace>,
@@ -128,6 +131,7 @@ impl Sampler {
             buf: vec![0; 1 << 17],
             cpu_times: HashMap::new(),
             thread_times: HashMap::new(),
+            core_times: Vec::new(),
             disk_bytes: HashMap::new(),
             gpus: None,
             net: None,
@@ -221,7 +225,37 @@ impl Sampler {
         let octets = interface_octets();
         let net = rate(self.iface_bytes.map(|prev| octets.saturating_sub(prev)).unwrap_or(0), secs);
         self.iface_bytes = Some(octets);
-        Sample { ram, commit, gpus, procs, net, net_per_process: self.net.is_some() }
+        let cores = self.cpu_cores();
+        Sample { ram, commit, gpus, procs, net, net_per_process: self.net.is_some(), cores }
+    }
+
+    /// The busy share of each CPU core over the interval, where its kernel time counts idle time too.
+    fn cpu_cores(&mut self) -> Vec<f32> {
+        let mut buf = [SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION::default(); 64];
+        let mut needed = 0;
+        let size = (buf.len() * size_of::<SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION>()) as u32;
+        let status = unsafe { NtQuerySystemInformation(SystemProcessorPerformanceInformation, buf.as_mut_ptr().cast(), size, &mut needed) };
+        if status.is_err() {
+            return Vec::new();
+        }
+        let count = needed as usize / size_of::<SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION>();
+        let mut cores = Vec::with_capacity(count);
+        let mut now = Vec::with_capacity(count);
+        for (i, core) in buf[..count].iter().enumerate() {
+            let (idle, kernel, user) = (core.IdleTime as u64, core.KernelTime as u64, core.UserTime as u64);
+            let usage = match self.core_times.get(i) {
+                Some(&(prev_idle, prev_kernel, prev_user)) => {
+                    let total = kernel.saturating_sub(prev_kernel) + user.saturating_sub(prev_user);
+                    let busy = total.saturating_sub(idle.saturating_sub(prev_idle));
+                    if total > 0 { busy as f32 * 100.0 / total as f32 } else { 0.0 }
+                }
+                None => 0.0,
+            };
+            cores.push(usage);
+            now.push((idle, kernel, user));
+        }
+        self.core_times = now;
+        cores
     }
 
     /// Fills the buffer with the kernel's list of processes, growing it as needed.
