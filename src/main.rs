@@ -23,6 +23,8 @@ const WINDOW_KEY: &str = "window";
 const BAR: egui::Color32 = egui::Color32::from_rgb(45, 75, 120);
 /// Half-transparent `BAR`, for the recent-peak bar behind the current one.
 const FAINT: egui::Color32 = egui::Color32::from_rgba_premultiplied(23, 38, 60, 128);
+/// The hovered program's share of a total, on the header bars.
+const HILITE: egui::Color32 = egui::Color32::from_rgb(222, 140, 51);
 const NAME_TIP: &str = "Processes grouped by executable. Click a program with several processes to list them.";
 const RAM_TIP: &str = "Physical memory that only this program uses, which ending it frees.";
 const COMMIT_TIP: &str = "Memory that only this program uses, also counting what was moved out of RAM to the page file or compressed memory. Its total is limited to RAM plus the page file.";
@@ -174,6 +176,8 @@ struct App {
     filter: String,
     /// The programs with their processes listed below them.
     expanded: HashSet<String>,
+    /// The program hovered last frame, whose contribution the header bars highlight.
+    hovered: Option<String>,
     /// The recent per-program usage, newest last, for the background bars and the peak sort.
     history: VecDeque<HashMap<String, Usage>>,
     /// Whether to offer relaunching as admin, which per-process network needs.
@@ -206,9 +210,10 @@ impl App {
             rx,
             sample: Sample::default(),
             sort: Col::Ram,
-            alt: false,
+            alt: true,
             filter: String::new(),
             expanded: HashSet::new(),
+            hovered: None,
             history: VecDeque::new(),
             offer_admin: sampler::offer_admin(),
             placed: false,
@@ -268,13 +273,13 @@ impl App {
         let gpus = &self.sample.gpus;
         let mut cols = vec![
             (Col::Name, "Program".to_owned(), NAME_TIP.to_owned()),
+            (Col::Cpu, "CPU".to_owned(), CPU_TIP.to_owned()),
             (Col::Ram, "RAM".to_owned(), RAM_TIP.to_owned()),
             (Col::Commit, "Commit".to_owned(), COMMIT_TIP.to_owned()),
         ];
         for (i, gpu) in gpus.iter().enumerate() {
             cols.push((Col::Vram(i), vram_title(gpus, i), format!("Dedicated video memory that this program uses on the {}.", gpu.name)));
         }
-        cols.push((Col::Cpu, "CPU".to_owned(), CPU_TIP.to_owned()));
         cols.push((Col::Disk, "Disk".to_owned(), DISK_TIP.to_owned()));
         cols.push((Col::Net, "Network".to_owned(), NET_TIP.to_owned()));
         // The biggest each column reached recently, to scale its background bars against.
@@ -290,8 +295,10 @@ impl App {
         }
         let cpu: f32 = self.sample.procs.iter().map(|proc| proc.usage.cpu).sum();
         let disk: u64 = self.sample.procs.iter().map(|proc| proc.usage.disk).sum();
+        // The hovered program's usage, to highlight its share on each header bar.
+        let hovered_usage = self.hovered.as_deref().and_then(|name| groups.iter().find(|group| group.name == name)).map(|group| &group.usage);
 
-        let (mut sort, mut toggle, mut relaunch, mut kill) = (None, None, false, None);
+        let (mut sort, mut toggle, mut relaunch, mut kill, mut now_hovered) = (None, None, false, None, None);
         let height = ui.spacing().interact_size.y;
         // The totals or filter on top, the sortable title below.
         let header_height = 2.0 * (height + ui.spacing().item_spacing.y);
@@ -321,13 +328,25 @@ impl App {
                                 Col::Name => {
                                     ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Search").desired_width(ui.available_width()));
                                 }
-                                Col::Cpu => total_bar(ui, cpu / 100.0, format!("{cpu:.0}%")),
-                                // Rates have no capacity, so just the figure.
-                                Col::Disk => total_bar(ui, 0.0, rate(disk)),
-                                Col::Net => total_bar(ui, 0.0, rate(self.sample.net)),
+                                Col::Cpu => {
+                                    let contrib = hovered_usage.map(|usage| usage.cpu / 100.0).unwrap_or(0.0);
+                                    total_bar(ui, cpu / 100.0, contrib, format!("{cpu:.0}%"));
+                                }
+                                // Rates have no capacity, so the bar (the current total split by program) only appears while hovering.
+                                Col::Disk => {
+                                    let contrib = hovered_usage.map(|usage| usage.disk as f32 / disk.max(1) as f32).unwrap_or(0.0);
+                                    total_bar(ui, if hovered_usage.is_some() { 1.0 } else { 0.0 }, contrib, rate(disk));
+                                }
+                                Col::Net => {
+                                    let contrib = hovered_usage.map(|usage| usage.net as f32 / self.sample.net.max(1) as f32).unwrap_or(0.0);
+                                    total_bar(ui, if hovered_usage.is_some() { 1.0 } else { 0.0 }, contrib, rate(self.sample.net));
+                                }
                                 _ => match col.total(&self.sample).filter(|total| total.total > 0) {
-                                    Some(total) => total_bar(ui, total.used as f32 / total.total as f32, used_of(total)),
-                                    None => total_bar(ui, 0.0, String::new()),
+                                    Some(total) => {
+                                        let contrib = hovered_usage.map(|usage| col.value(usage) as f32 / total.total as f32).unwrap_or(0.0);
+                                        total_bar(ui, total.used as f32 / total.total as f32, contrib, used_of(total));
+                                    }
+                                    None => total_bar(ui, 0.0, 0.0, String::new()),
                                 },
                             }
                             let arrow = sort_arrow(self.sort == *col, *col, self.alt);
@@ -352,6 +371,12 @@ impl App {
                     row.col(|ui| {
                         // Hovering a row reveals buttons to end its program or process, on the right of its name.
                         let hovered = ui.rect_contains_pointer(ui.max_rect());
+                        if hovered {
+                            now_hovered = Some(match rows[index] {
+                                Row::Group(group) => group.name.to_owned(),
+                                Row::Proc(proc) => proc.name.clone(),
+                            });
+                        }
                         egui::containers::Sides::new().shrink_left().show(
                             ui,
                             |ui| match rows[index] {
@@ -418,9 +443,10 @@ impl App {
                 });
             });
 
+        self.hovered = now_hovered;
         if let Some(col) = sort {
-            // Clicking the sorted column again flips to its alternate mode; a new column starts in its main mode.
-            self.alt = if col == self.sort { !self.alt } else { false };
+            // A new column starts by its recent peak (names A to Z); clicking it again flips to the current value (names Z to A).
+            self.alt = if col == self.sort { !self.alt } else { col != Col::Name };
             self.sort = col;
         }
         if let Some(name) = toggle
@@ -583,11 +609,12 @@ fn paint_bar(ui: &egui::Ui, rect: egui::Rect, fraction: f32, color: egui::Color3
     }
 }
 
-/// A full-width total: a flat background bar with its figure right-aligned on top.
-fn total_bar(ui: &mut egui::Ui, fraction: f32, text: String) {
+/// A full-width total: a flat background bar with the hovered program's share highlighted, and the figure right-aligned on top.
+fn total_bar(ui: &mut egui::Ui, used: f32, contrib: f32, text: String) {
     let height = ui.spacing().interact_size.y;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::hover());
-    paint_bar(ui, rect, fraction, BAR);
+    paint_bar(ui, rect, used, BAR);
+    paint_bar(ui, rect, contrib, HILITE);
     let font = egui::TextStyle::Button.resolve(ui.style());
     let at = rect.right_center() - egui::vec2(ui.spacing().item_spacing.x, 0.0);
     ui.painter().text(at, egui::Align2::RIGHT_CENTER, text, font, ui.visuals().text_color());
