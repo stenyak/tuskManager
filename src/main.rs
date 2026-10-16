@@ -377,11 +377,11 @@ impl App {
                                     Row::Group(group) => (group.procs.iter().map(|proc| proc.pid).collect::<Vec<_>>(), "program"),
                                     Row::Proc(proc) => (vec![proc.pid], "process"),
                                 };
-                                if ui.button("End tree").on_hover_text(format!("End this {what} and everything it started")).clicked() {
+                                if ui.button("Kill").on_hover_text(format!("End this {what} and everything it started")).clicked() {
                                     kill = Some(with_descendants(&self.sample.procs, &pids));
                                     acted = true;
                                 }
-                                if ui.button("End").on_hover_text(format!("End this {what}")).clicked() {
+                                if ui.button("Close").on_hover_text(format!("End this {what}")).clicked() {
                                     kill = Some(pids);
                                     acted = true;
                                 }
