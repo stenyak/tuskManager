@@ -3,6 +3,7 @@
 mod sampler;
 
 use eframe::egui;
+use egui::emath::GuiRounding;
 use egui::scroll_area::ScrollBarVisibility;
 use egui_extras::{Column, TableBuilder};
 use serde::{Deserialize, Serialize};
@@ -667,23 +668,27 @@ fn total_bar(ui: &mut egui::Ui, used: f32, contrib: f32, text: String) {
 fn core_bars(ui: &mut egui::Ui, cores: &[f32], text: String) {
     let height = ui.spacing().interact_size.y;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::hover());
+    let ppp = ui.ctx().pixels_per_point();
+    // Snap the shared baseline to a physical pixel so every bar starts on the exact same line.
+    let bottom = rect.bottom().round_to_pixels(ppp);
+    // Bars use the whole column width; the figure is drawn over them, not beside them.
+    let step = rect.width() / cores.len().max(1) as f32;
+    for (i, &usage) in cores.iter().enumerate() {
+        let fraction = (usage / 100.0).clamp(0.0, 1.0);
+        // Bars touch edge to edge, snapped to pixels, so a dense many-core CPU reads clearly and evenly.
+        let x0 = (rect.left() + i as f32 * step).round_to_pixels(ppp);
+        let x1 = (rect.left() + (i + 1) as f32 * step).round_to_pixels(ppp);
+        let top = (rect.bottom() - rect.height() * fraction).round_to_pixels(ppp);
+        let bar = egui::Rect::from_min_max(egui::pos2(x0, top), egui::pos2(x1, bottom));
+        // Every core over 90% turns red, each judged on its own.
+        ui.painter().rect_filled(bar, egui::CornerRadius::ZERO, if usage > 90.0 { HOT } else { CORE_BAR });
+    }
+    // The busiest-core figure, right-aligned on top of the bars.
     let font = egui::TextStyle::Button.resolve(ui.style());
     let color = ui.visuals().text_color();
     let gap = ui.spacing().item_spacing.x;
-    // Place the figure right-aligned and keep the bars clear of it.
     let galley = ui.painter().layout_no_wrap(text, font, color);
-    let text_width = galley.size().x;
-    ui.painter().galley(egui::pos2(rect.right() - gap - text_width, rect.center().y - galley.size().y / 2.0), galley, color);
-    let bars_width = (rect.width() - text_width - 2.0 * gap).max(0.0);
-    let step = bars_width / cores.len().max(1) as f32;
-    for (i, &usage) in cores.iter().enumerate() {
-        let fraction = (usage / 100.0).clamp(0.0, 1.0);
-        // Bars touch edge to edge, each ending where the next begins, so a dense many-core CPU still reads clearly.
-        let x0 = rect.left() + i as f32 * step;
-        let x1 = rect.left() + (i + 1) as f32 * step;
-        let bar = egui::Rect::from_min_max(egui::pos2(x0, rect.bottom() - rect.height() * fraction), egui::pos2(x1, rect.bottom()));
-        ui.painter().rect_filled(bar, egui::CornerRadius::ZERO, if usage > 90.0 { HOT } else { CORE_BAR });
-    }
+    ui.painter().galley(egui::pos2(rect.right() - gap - galley.size().x, rect.center().y - galley.size().y / 2.0), galley, color);
 }
 
 /// The marker on the sorted column's title: up for names A to Z, down otherwise, with the recent-peak mode noted.
