@@ -81,11 +81,14 @@ impl Usage {
 }
 
 pub struct Proc {
+    /// Zero for the rows of memory that no process owns, like the kernel's pools, which can't be ended.
     pub pid: u32,
     /// The process that started this one, for ending a whole tree.
     pub parent: u32,
     /// The executable's file name.
     pub name: String,
+    /// What a row that isn't a process holds; empty for processes.
+    pub tip: &'static str,
     pub usage: Usage,
 }
 
@@ -470,7 +473,13 @@ impl App {
                                     };
                                     ui.add_sized([12.0, height], egui::Label::new(arrow));
                                     let text = if several { format!("{} ({})", group.name, group.procs.len()) } else { group.name.to_owned() };
-                                    ui.add(egui::Label::new(text).truncate());
+                                    // Memory that no process owns, in italics with what it holds on hover.
+                                    let tip = group.procs[0].tip;
+                                    if tip.is_empty() {
+                                        ui.add(egui::Label::new(text).truncate());
+                                    } else {
+                                        ui.add(egui::Label::new(egui::RichText::new(text).italics()).truncate()).on_hover_text(tip);
+                                    }
                                 }
                                 Row::Proc(proc) => {
                                     ui.add_space(32.0);
@@ -485,6 +494,10 @@ impl App {
                                     Row::Group(group) => (group.procs.iter().map(|proc| proc.pid).collect::<Vec<_>>(), "program"),
                                     Row::Proc(proc) => (vec![proc.pid], "process"),
                                 };
+                                // Memory rows that aren't processes can't be ended.
+                                if pids.contains(&0) {
+                                    return;
+                                }
                                 if ui.button("Kill").on_hover_text(format!("End this {what} and everything it started")).clicked() {
                                     kill = Some(with_descendants(&self.sample.procs, &pids));
                                     acted = true;

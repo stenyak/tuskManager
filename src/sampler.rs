@@ -33,8 +33,8 @@ use windows::{
                 StartTraceW, WNODE_FLAG_TRACED_GUID,
             },
             Performance::{
-                PDH_CSTATUS_NEW_DATA, PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_LARGE, PDH_HCOUNTER, PDH_HQUERY, PDH_MORE_DATA, PdhAddEnglishCounterW,
-                PdhCollectQueryData, PdhGetFormattedCounterArrayW, PdhOpenQueryW,
+                PDH_CSTATUS_NEW_DATA, PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_LARGE, PDH_HCOUNTER, PDH_HQUERY, PDH_MORE_DATA,
+                PdhAddEnglishCounterW, PdhCollectQueryData, PdhGetFormattedCounterArrayW, PdhGetFormattedCounterValue, PdhOpenQueryW,
             },
             Registry::{HKEY_LOCAL_MACHINE, REG_ROUTINE_FLAGS, RRF_RT_REG_MULTI_SZ, RRF_RT_REG_SZ, RegGetValueW},
             SystemInformation::{GetLogicalProcessorInformationEx, GlobalMemoryStatusEx, MEMORYSTATUSEX, RelationProcessorCore},
@@ -117,6 +117,7 @@ pub struct Sampler {
     core_times: Vec<(u64, u64, u64)>,
     disk_bytes: HashMap<(u32, i64), u64>,
     gpus: Option<Gpus>,
+    system: Option<SystemMemory>,
     net: Option<NetTrace>,
     /// The previous network bytes of each process, from the trace.
     net_bytes: HashMap<u32, u64>,
@@ -136,6 +137,7 @@ impl Sampler {
             core_times: Vec::new(),
             disk_bytes: HashMap::new(),
             gpus: None,
+            system: None,
             net: None,
             net_bytes: HashMap::new(),
             iface_bytes: None,
@@ -150,6 +152,7 @@ impl Sampler {
     pub fn prepare(&mut self) {
         if !self.prepared {
             self.gpus = Gpus::new();
+            self.system = SystemMemory::new();
             self.net = NetTrace::new();
             self.details.cpu = cpu_info();
             self.prepared = true;
@@ -211,7 +214,7 @@ impl Sampler {
                         net,
                     };
                     disk_bytes.insert((pid, info.create_time), io);
-                    procs.push(Proc { pid, parent: info.inherited_from_unique_process_id as u32, name, usage });
+                    procs.push(Proc { pid, parent: info.inherited_from_unique_process_id as u32, name, tip: "", usage });
                     cpu_deltas.push(cpu_delta);
                 }
                 if info.next_entry_offset == 0 {
@@ -228,6 +231,10 @@ impl Sampler {
             proc.usage.cpu = delta as f32 * 100.0 / all_cpu_delta.max(1) as f32;
         }
         let (ram, commit) = memory();
+        if let Some(system) = &mut self.system {
+            let rows = system.rows(&ram, &commit, &procs, &gpus);
+            procs.extend(rows);
+        }
         let octets = interface_octets();
         let net = rate(self.iface_bytes.map(|prev| octets.saturating_sub(prev)).unwrap_or(0), secs);
         self.iface_bytes = Some(octets);
@@ -397,6 +404,85 @@ fn values(counter: PDH_HCOUNTER, buf: &mut Vec<u64>) -> Vec<(String, u64)> {
             .map(|item| (item.szName.to_string().unwrap_or_default(), item.FmtValue.Anonymous.largeValue as u64))
             .collect()
     }
+}
+
+/// The memory that no process owns, from the system's own counters, to list as rows of its own among the processes.
+struct SystemMemory {
+    query: PDH_HQUERY,
+    nonpaged: PDH_HCOUNTER,
+    paged: PDH_HCOUNTER,
+    paged_resident: PDH_HCOUNTER,
+    cache: PDH_HCOUNTER,
+    drivers: PDH_HCOUNTER,
+    code: PDH_HCOUNTER,
+    modified: PDH_HCOUNTER,
+    /// The system RAM that each GPU uses, missing on machines without GPU counters.
+    gpu_shared: PDH_HCOUNTER,
+    buf: Vec<u64>,
+}
+
+impl SystemMemory {
+    fn new() -> Option<Self> {
+        let mut query = PDH_HQUERY::default();
+        let mut counters = [PDH_HCOUNTER::default(); 7];
+        let paths = [
+            w!(r"\Memory\Pool Nonpaged Bytes"),
+            w!(r"\Memory\Pool Paged Bytes"),
+            w!(r"\Memory\Pool Paged Resident Bytes"),
+            w!(r"\Memory\System Cache Resident Bytes"),
+            w!(r"\Memory\System Driver Resident Bytes"),
+            w!(r"\Memory\System Code Resident Bytes"),
+            w!(r"\Memory\Modified Page List Bytes"),
+        ];
+        let mut gpu_shared = PDH_HCOUNTER::default();
+        unsafe {
+            if PdhOpenQueryW(PCWSTR::null(), 0, &mut query) != 0 || paths.iter().zip(&mut counters).any(|(path, counter)| PdhAddEnglishCounterW(query, *path, 0, counter) != 0) {
+                return None;
+            }
+            _ = PdhAddEnglishCounterW(query, w!(r"\GPU Adapter Memory(*)\Shared Usage"), 0, &mut gpu_shared);
+        }
+        let [nonpaged, paged, paged_resident, cache, drivers, code, modified] = counters;
+        Some(Self { query, nonpaged, paged, paged_resident, cache, drivers, code, modified, gpu_shared, buf: Vec::new() })
+    }
+
+    /// The rows, plus one for whatever neither they nor the processes account for, so the list adds up to the totals.
+    fn rows(&mut self, ram: &Total, commit: &Total, procs: &[Proc], gpus: &[Gpu]) -> Vec<Proc> {
+        unsafe { PdhCollectQueryData(self.query) };
+        let (nonpaged, paged) = (value(self.nonpaged), value(self.paged));
+        let gpu_shared = values(self.gpu_shared, &mut self.buf).iter().map(|(_, bytes)| bytes).sum();
+        let mut rows = vec![
+            row("Kernel non-paged pool", "Kernel and driver memory that always stays in RAM.", nonpaged, nonpaged),
+            row("Kernel paged pool", "Kernel and driver memory that can move to the page file.", value(self.paged_resident), paged),
+            row("GPU memory in RAM", "System RAM that the GPUs hold, like textures and buffers.", gpu_shared, 0),
+            row("File cache", "Data of files in use, which Windows keeps in RAM.", value(self.cache), 0),
+            row("Kernel and driver code", "The code of Windows' kernel and its drivers.", value(self.drivers) + value(self.code), 0),
+            row("Modified pages", "Changed memory waiting to be written to disk.", value(self.modified), 0),
+        ];
+        let owned = |usage: fn(&Usage) -> u64| procs.iter().chain(&rows).map(|proc| usage(&proc.usage)).sum::<u64>();
+        let mut other = row(
+            "Other system memory",
+            "Memory no program owns: pages shared between programs, memory that drivers lock, page tables and more.",
+            ram.used.saturating_sub(owned(|usage| usage.ram)),
+            commit.used.saturating_sub(owned(|usage| usage.commit)),
+        );
+        other.usage.vram = gpus.iter().enumerate().map(|(gpu, total)| total.vram.used.saturating_sub(procs.iter().filter_map(|proc| proc.usage.vram.get(gpu)).sum())).collect();
+        rows.push(other);
+        rows
+    }
+}
+
+/// A row of memory that no process owns.
+fn row(name: &str, tip: &'static str, ram: u64, commit: u64) -> Proc {
+    Proc { pid: 0, parent: 0, name: name.to_owned(), tip, usage: Usage { ram, commit, ..Default::default() } }
+}
+
+/// The value of a counter without instances, from the last collection.
+fn value(counter: PDH_HCOUNTER) -> u64 {
+    let mut value = PDH_FMT_COUNTERVALUE::default();
+    if unsafe { PdhGetFormattedCounterValue(counter, PDH_FMT_LARGE, None, &mut value) } != 0 {
+        return 0;
+    }
+    unsafe { value.Anonymous.largeValue as u64 }
 }
 
 /// RAM, and the commit charge against its limit.
