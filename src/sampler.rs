@@ -457,6 +457,7 @@ impl SystemMemory {
             row("File cache", "Data of files in use, which Windows keeps in RAM.", value(self.cache), 0),
             row("Kernel and driver code", "The code of Windows' kernel and its drivers.", value(self.drivers) + value(self.code), 0),
             row("Modified pages", "Changed memory waiting to be written to disk.", value(self.modified), 0),
+            row("Shared memory", "Memory that programs share with each other, counted once here rather than in any of them.", 0, shared_committed()),
         ];
         let owned = |usage: fn(&Usage) -> u64| procs.iter().chain(&rows).map(|proc| usage(&proc.usage)).sum::<u64>();
         let mut other = row(
@@ -469,6 +470,29 @@ impl SystemMemory {
         rows.push(other);
         rows
     }
+}
+
+/// The start of SYSTEM_MEMORY_USAGE_INFORMATION.
+#[repr(C)]
+#[derive(Default)]
+struct MemoryUsage {
+    _total_physical: u64,
+    _available: u64,
+    _resident_available: i64,
+    _committed: u64,
+    shared_committed: u64,
+    _commit_limit: u64,
+    _peak_commitment: u64,
+}
+
+/// The commit charge of memory that programs share, like memory-mapped sections backed by the page file.
+fn shared_committed() -> u64 {
+    // SystemMemoryUsageInformation, which the bindings don't name.
+    const MEMORY_USAGE: SYSTEM_INFORMATION_CLASS = SYSTEM_INFORMATION_CLASS(182);
+    let mut usage = MemoryUsage::default();
+    let mut needed = 0;
+    let status = unsafe { NtQuerySystemInformation(MEMORY_USAGE, (&raw mut usage).cast(), size_of::<MemoryUsage>() as u32, &mut needed) };
+    if status.is_ok() { usage.shared_committed } else { 0 }
 }
 
 /// A row of memory that no process owns.
