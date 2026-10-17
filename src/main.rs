@@ -34,7 +34,9 @@ const FAINT_HILITE: egui::Color32 = egui::Color32::from_rgb(130, 88, 42);
 const HOT: egui::Color32 = egui::Color32::from_rgb(170, 60, 55);
 /// The per-core header bars, brighter than `BAR` so the thin bars on many-core CPUs stay legible.
 const CORE_BAR: egui::Color32 = egui::Color32::from_rgb(90, 140, 210);
-const NAME_TIP: &str = "Grouped by executable";
+/// The names of the rows of memory that no program owns, like the kernel's pools.
+const SYSTEM_TEXT: egui::Color32 = egui::Color32::from_rgb(130, 180, 245);
+const NAME_TIP: &str = "Programs by executable, and memory no program owns";
 const RAM_TIP: &str = "Private RAM";
 const COMMIT_TIP: &str = "Private RAM + page file";
 const CPU_TIP: &str = "Overall use";
@@ -322,7 +324,7 @@ impl App {
     fn table_ui(&mut self, ui: &mut egui::Ui) {
         let gpus = &self.sample.gpus;
         let mut cols = vec![
-            (Col::Name, "Program".to_owned(), NAME_TIP.to_owned()),
+            (Col::Name, "Name".to_owned(), NAME_TIP.to_owned()),
             (Col::Cpu, "CPU".to_owned(), CPU_TIP.to_owned()),
             (Col::Core, "Core".to_owned(), CORE_TIP.to_owned()),
             (Col::Ram, "RAM".to_owned(), RAM_TIP.to_owned()),
@@ -480,12 +482,12 @@ impl App {
                                     };
                                     ui.add_sized([12.0, height], egui::Label::new(arrow));
                                     let text = if several { format!("{} ({})", group.name, group.procs.len()) } else { group.name.to_owned() };
-                                    // Memory that no process owns, in italics with what it holds on hover.
+                                    // Memory that no process owns, in blue with what it holds on hover.
                                     let tip = group.procs[0].tip;
                                     if tip.is_empty() {
                                         ui.add(egui::Label::new(text).truncate());
                                     } else {
-                                        ui.add(egui::Label::new(egui::RichText::new(text).italics()).truncate()).on_hover_text(tip);
+                                        ui.add(egui::Label::new(egui::RichText::new(text).color(SYSTEM_TEXT)).truncate()).on_hover_text(tip);
                                     }
                                 }
                                 Row::Proc(proc) => {
@@ -535,7 +537,7 @@ impl App {
                                 ui.label(col.text(usage));
                                 // The memory a program shares with others, which its own figure leaves out.
                                 if *col == Col::Ram && usage.shared > 0 {
-                                    ui.label(egui::RichText::new(format!("(shared {})", size(usage.shared))).small().weak());
+                                    ui.label(egui::RichText::new(format!("{}(sh)", size(usage.shared))).small());
                                 }
                             });
                         });

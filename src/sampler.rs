@@ -419,6 +419,8 @@ struct SystemMemory {
     modified: PDH_HCOUNTER,
     /// The system RAM that each GPU uses, missing on machines without GPU counters.
     gpu_shared: PDH_HCOUNTER,
+    /// The pages Windows gave to the hypervisor, only on machines running one.
+    hypervisor: Option<PDH_HCOUNTER>,
     buf: Vec<u64>,
 }
 
@@ -435,15 +437,16 @@ impl SystemMemory {
             w!(r"\Memory\System Code Resident Bytes"),
             w!(r"\Memory\Modified Page List Bytes"),
         ];
-        let mut gpu_shared = PDH_HCOUNTER::default();
-        unsafe {
+        let (mut gpu_shared, mut hypervisor) = (PDH_HCOUNTER::default(), PDH_HCOUNTER::default());
+        let hypervisor = unsafe {
             if PdhOpenQueryW(PCWSTR::null(), 0, &mut query) != 0 || paths.iter().zip(&mut counters).any(|(path, counter)| PdhAddEnglishCounterW(query, *path, 0, counter) != 0) {
                 return None;
             }
             _ = PdhAddEnglishCounterW(query, w!(r"\GPU Adapter Memory(*)\Shared Usage"), 0, &mut gpu_shared);
-        }
+            (PdhAddEnglishCounterW(query, w!(r"\Hyper-V Hypervisor Root Partition(*)\Deposited Pages"), 0, &mut hypervisor) == 0).then_some(hypervisor)
+        };
         let [nonpaged, paged, paged_resident, cache, drivers, code, modified] = counters;
-        Some(Self { query, nonpaged, paged, paged_resident, cache, drivers, code, modified, gpu_shared, buf: Vec::new() })
+        Some(Self { query, nonpaged, paged, paged_resident, cache, drivers, code, modified, gpu_shared, hypervisor, buf: Vec::new() })
     }
 
     /// The rows, plus one for whatever neither they nor the processes account for, so the list adds up to the totals.
@@ -460,6 +463,11 @@ impl SystemMemory {
             row("Modified pages", "Changed memory waiting to be written to disk.", value(self.modified), 0),
             row("Shared memory", "Memory that programs share with each other, counted once here rather than in any of them.", 0, shared_committed()),
         ];
+        if let Some(hypervisor) = self.hypervisor {
+            // Counted in pages, under the root partition, with a "_Total" instance repeating it.
+            let pages: u64 = values(hypervisor, &mut self.buf).iter().filter(|(instance, _)| !instance.starts_with('_')).map(|(_, pages)| pages).sum();
+            rows.push(row("Hypervisor", "Memory Windows gives to the hypervisor, which runs its virtualization-based security and virtual machines.", pages * 4096, 0));
+        }
         let owned = |usage: fn(&Usage) -> u64| procs.iter().chain(&rows).map(|proc| usage(&proc.usage)).sum::<u64>();
         let mut other = row(
             "Other system memory",
