@@ -200,7 +200,9 @@ impl Sampler {
                         commit: info.pagefile_usage as u64,
                         vram: vram.remove(&pid).unwrap_or_default(),
                         cpu: 0.0,
-                        core: (busiest as f64 * 100.0 / (secs * 1e7)) as f32,
+                        // Thread times are charged in clock ticks, sometimes late, so a busy thread's delta can exceed
+                        // the interval by a few ticks; a thread can't use more than one core, so cap it there.
+                        core: ((busiest as f64 * 100.0 / (secs * 1e7)) as f32).min(100.0),
                         disk: rate(delta(&self.disk_bytes, (pid, info.create_time), io), secs),
                         net,
                     };
