@@ -708,7 +708,8 @@ fn exe_dir() -> PathBuf {
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([950.0, 450.0]),
+        // Releases are plain numbers, but Cargo needs x.y.z, so only the major part is shown.
+        viewport: egui::ViewportBuilder::default().with_title(concat!("tuskManager v", env!("CARGO_PKG_VERSION_MAJOR"))).with_inner_size([950.0, 450.0]),
         // Without a path eframe keeps its window record in the user's app data; here it sits next to the exe.
         persistence_path: Some(exe_dir().join("data").join("window.ron")),
         ..Default::default()
