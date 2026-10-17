@@ -32,13 +32,16 @@ const HILITE: egui::Color32 = egui::Color32::from_rgb(222, 140, 51);
 const HOT: egui::Color32 = egui::Color32::from_rgb(170, 60, 55);
 /// The per-core header bars, brighter than `BAR` so the thin bars on many-core CPUs stay legible.
 const CORE_BAR: egui::Color32 = egui::Color32::from_rgb(90, 140, 210);
-const NAME_TIP: &str = "Processes grouped by executable. Click a program with several processes to list them.";
-const RAM_TIP: &str = "Physical memory that only this program uses, which ending it frees.";
-const COMMIT_TIP: &str = "Memory that only this program uses, also counting what was moved out of RAM to the page file or compressed memory. Its total is limited to RAM plus the page file.";
-const CPU_TIP: &str = "Share of the time of all CPU cores, over the last second.";
-const CORE_TIP: &str = "The busiest single thread of this program, as a share of one CPU core over the last second. Near 100% means one core is maxed by a single thread, a bottleneck the all-core CPU share hides.";
-const DISK_TIP: &str = "Bytes per second this program read from and wrote to disk, over the last second.";
-const NET_TIP: &str = "Bytes per second this program sent and received, over the last second. Needs admin rights.";
+const NAME_TIP: &str = "Grouped by executable";
+const RAM_TIP: &str = "Private RAM";
+const COMMIT_TIP: &str = "Private RAM + page file";
+const CPU_TIP: &str = "Overall use";
+const CORE_TIP: &str = "Max single-core use";
+const VRAM_TIP: &str = "Video memory";
+const DISK_TIP: &str = "Read + write speed";
+const NET_TIP: &str = "Send + receive speed (needs admin)";
+/// What the "10s" mark on a value column sorted by its recent peak means.
+const PEAK_TIP: &str = "10s = 10-second peak";
 
 /// What a process uses, or all the processes of a program.
 #[derive(Default)]
@@ -210,8 +213,12 @@ impl App {
     fn new(cc: &eframe::CreationContext) -> Self {
         let (tx, rx) = mpsc::channel();
         let ctx = cc.egui_ctx.clone();
-        // Near-white text, brighter than egui's default gray, so the dense numbers read clearly.
-        ctx.all_styles_mut(|style| style.visuals.override_text_color = Some(egui::Color32::from_gray(235)));
+        ctx.all_styles_mut(|style| {
+            // Near-white text, brighter than egui's default gray, so the dense numbers read clearly.
+            style.visuals.override_text_color = Some(egui::Color32::from_gray(235));
+            // The header tooltips explain the columns, so show them at a quarter of egui's usual delay.
+            style.interaction.tooltip_delay *= 0.25;
+        });
         // Sampling takes a moment, which would stall the UI.
         std::thread::spawn({
             let ctx = ctx.clone();
@@ -303,8 +310,8 @@ impl App {
             (Col::Ram, "RAM".to_owned(), RAM_TIP.to_owned()),
             (Col::Commit, "Commit".to_owned(), COMMIT_TIP.to_owned()),
         ];
-        for (i, gpu) in gpus.iter().enumerate() {
-            cols.push((Col::Vram(i), vram_title(gpus, i), format!("Dedicated video memory that this program uses on the {}.", gpu.name)));
+        for i in 0..gpus.len() {
+            cols.push((Col::Vram(i), vram_title(gpus, i), VRAM_TIP.to_owned()));
         }
         cols.push((Col::Disk, "Disk".to_owned(), DISK_TIP.to_owned()));
         cols.push((Col::Net, "Network".to_owned(), NET_TIP.to_owned()));
@@ -350,8 +357,9 @@ impl App {
             .header(header_height, |mut header| {
                 for (col, title, tip) in &cols {
                     header.col(|ui| {
-                        // A click anywhere in the header cell sorts; added first so the search box and title on top still get their own clicks.
-                        let cell = ui.interact(ui.max_rect(), ui.id().with("sort"), egui::Sense::click());
+                        // A click anywhere in the header cell sorts, and hovering it explains the column; added first so the search box on top still gets its own clicks.
+                        let tooltip = if *col == Col::Name { tip.clone() } else { format!("{tip}\n{PEAK_TIP}") };
+                        let cell = ui.interact(ui.max_rect(), ui.id().with("sort"), egui::Sense::click()).on_hover_text(tooltip);
                         let align = if *col == Col::Name { egui::Align::Min } else { egui::Align::Max };
                         ui.with_layout(egui::Layout::top_down(align), |ui| {
                             // The totals, or the filter, above the title.
@@ -387,9 +395,9 @@ impl App {
                                     None => total_bar(ui, 0.0, 0.0, String::new()),
                                 },
                             }
-                            // Plain text, not a button: the whole header cell handles the click to sort.
+                            // Plain text, not a button: the whole header cell handles the click to sort and the tooltip.
                             let arrow = sort_arrow(self.sort == *col, *col, self.alt);
-                            ui.label(format!("{title}{arrow}")).on_hover_text(tip);
+                            ui.label(format!("{title}{arrow}"));
                         });
                         if cell.clicked() {
                             sort = Some(*col);
