@@ -28,6 +28,8 @@ const BAR: egui::Color32 = egui::Color32::from_rgb(45, 75, 120);
 const FAINT: egui::Color32 = egui::Color32::from_rgba_premultiplied(23, 38, 60, 128);
 /// The hovered program's share of a total, on the header bars.
 const HILITE: egui::Color32 = egui::Color32::from_rgb(222, 140, 51);
+/// A dimmer `HILITE`, for the programs listed above the hovered one on the sorted column's header bar.
+const FAINT_HILITE: egui::Color32 = egui::Color32::from_rgb(130, 88, 42);
 /// A CPU core running hot, over 90%, on the per-core header graph.
 const HOT: egui::Color32 = egui::Color32::from_rgb(170, 60, 55);
 /// The per-core header bars, brighter than `BAR` so the thin bars on many-core CPUs stay legible.
@@ -341,6 +343,11 @@ impl App {
         let disk: u64 = self.sample.procs.iter().map(|proc| proc.usage.disk).sum();
         // The hovered program's usage, to highlight its share on each header bar.
         let hovered_usage = self.hovered.as_deref().and_then(|name| groups.iter().find(|group| group.name == name)).map(|group| &group.usage);
+        // The sorted column's sum over the programs listed above the hovered one, so its header shows the top programs' running total.
+        let above: f64 = match (hovered_usage, self.hovered.as_deref()) {
+            (Some(_), Some(name)) => groups.iter().take_while(|group| group.name != name).map(|group| self.sort.value(&group.usage)).sum(),
+            _ => 0.0,
+        };
 
         let (mut sort, mut toggle, mut relaunch, mut kill, mut now_hovered) = (None, None, false, None, None);
         let height = ui.spacing().interact_size.y;
@@ -379,6 +386,9 @@ impl App {
                         let tooltip = [tip.as_str(), detail, peak].into_iter().filter(|line| !line.is_empty()).collect::<Vec<_>>().join("\n");
                         let cell = ui.interact(ui.max_rect(), ui.id().with("sort"), egui::Sense::click()).on_hover_text(tooltip);
                         let align = if *col == Col::Name { egui::Align::Min } else { egui::Align::Max };
+                        // The running total above the hovered program, as a fraction of a header bar's full width; only on the sorted column.
+                        let sorted = self.sort == *col;
+                        let faint = |full: f64| if sorted { (above / full.max(1.0)) as f32 } else { 0.0 };
                         ui.with_layout(egui::Layout::top_down(align), |ui| {
                             // The totals, or the filter, above the title.
                             match col {
@@ -387,7 +397,7 @@ impl App {
                                 }
                                 Col::Cpu => {
                                     let contrib = hovered_usage.map(|usage| usage.cpu / 100.0).unwrap_or(0.0);
-                                    total_bar(ui, cpu / 100.0, contrib, format!("{cpu:.0}%"));
+                                    total_bar(ui, cpu / 100.0, faint(100.0), contrib, format!("{cpu:.0}%"));
                                 }
                                 // A small bar per core, the busiest core's figure on top.
                                 Col::Core => {
@@ -399,18 +409,18 @@ impl App {
                                 // Rates have no capacity, so the bar (the current total split by program) only appears while hovering.
                                 Col::Disk => {
                                     let contrib = hovered_usage.map(|usage| usage.disk as f32 / disk.max(1) as f32).unwrap_or(0.0);
-                                    total_bar(ui, if hovered_usage.is_some() { 1.0 } else { 0.0 }, contrib, rate(disk));
+                                    total_bar(ui, if hovered_usage.is_some() { 1.0 } else { 0.0 }, faint(disk as f64), contrib, rate(disk));
                                 }
                                 Col::Net => {
                                     let contrib = hovered_usage.map(|usage| usage.net as f32 / self.sample.net.max(1) as f32).unwrap_or(0.0);
-                                    total_bar(ui, if hovered_usage.is_some() { 1.0 } else { 0.0 }, contrib, rate(self.sample.net));
+                                    total_bar(ui, if hovered_usage.is_some() { 1.0 } else { 0.0 }, faint(self.sample.net as f64), contrib, rate(self.sample.net));
                                 }
                                 _ => match col.total(&self.sample).filter(|total| total.total > 0) {
                                     Some(total) => {
                                         let contrib = hovered_usage.map(|usage| col.value(usage) as f32 / total.total as f32).unwrap_or(0.0);
-                                        total_bar(ui, total.used as f32 / total.total as f32, contrib, used_of(total));
+                                        total_bar(ui, total.used as f32 / total.total as f32, faint(total.total as f64), contrib, used_of(total));
                                     }
-                                    None => total_bar(ui, 0.0, 0.0, String::new()),
+                                    None => total_bar(ui, 0.0, 0.0, 0.0, String::new()),
                                 },
                             }
                             // Plain text, not a button: the whole header cell handles the click to sort and the tooltip.
@@ -439,7 +449,9 @@ impl App {
                     let mut acted = false;
                     row.col(|ui| {
                         // Hovering anywhere in the row (its full-width band) reveals the end buttons and highlights its header share.
-                        let hovered = ui.rect_contains_pointer(egui::Rect::from_x_y_ranges(table_x, ui.max_rect().y_range()));
+                        // Asked of the context, since the cell's own check clips to the cell; only the row's visible height counts.
+                        let band = egui::Rect::from_x_y_ranges(table_x, ui.clip_rect().y_range());
+                        let hovered = ui.ctx().rect_contains_pointer(ui.layer_id(), band);
                         if hovered {
                             now_hovered = Some(match rows[index] {
                                 Row::Group(group) => group.name.to_owned(),
@@ -672,19 +684,26 @@ fn admin_prompt(ui: &mut egui::Ui, row: usize, relaunch: &mut bool) {
 
 /// Fills the left part of a rectangle, flat, as a background bar behind a value.
 fn paint_bar(ui: &egui::Ui, rect: egui::Rect, fraction: f32, color: egui::Color32) {
-    let fraction = fraction.clamp(0.0, 1.0);
-    if fraction > 0.0 {
-        let filled = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width() * fraction, rect.height()));
-        ui.painter().rect_filled(filled, egui::CornerRadius::ZERO, color);
+    paint_span(ui, rect, 0.0, fraction, color);
+}
+
+/// Fills the part of a rectangle between two fractions of its width, flat.
+fn paint_span(ui: &egui::Ui, rect: egui::Rect, from: f32, to: f32, color: egui::Color32) {
+    let (from, to) = (from.clamp(0.0, 1.0), to.clamp(0.0, 1.0));
+    if from < to {
+        let span = egui::Rect::from_x_y_ranges(rect.left() + rect.width() * from..=rect.left() + rect.width() * to, rect.y_range());
+        ui.painter().rect_filled(span, egui::CornerRadius::ZERO, color);
     }
 }
 
 /// A full-width total: a flat background bar with the hovered program's share highlighted, and the figure right-aligned on top.
-fn total_bar(ui: &mut egui::Ui, used: f32, contrib: f32, text: String) {
+/// `above` is the faint share of the programs listed above the hovered one, which its own share then continues from.
+fn total_bar(ui: &mut egui::Ui, used: f32, above: f32, contrib: f32, text: String) {
     let height = ui.spacing().interact_size.y;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::hover());
     paint_bar(ui, rect, used, BAR);
-    paint_bar(ui, rect, contrib, HILITE);
+    paint_span(ui, rect, 0.0, above, FAINT_HILITE);
+    paint_span(ui, rect, above, above + contrib, HILITE);
     let font = egui::TextStyle::Button.resolve(ui.style());
     let at = rect.right_center() - egui::vec2(ui.spacing().item_spacing.x, 0.0);
     ui.painter().text(at, egui::Align2::RIGHT_CENTER, text, font, ui.visuals().text_color());
