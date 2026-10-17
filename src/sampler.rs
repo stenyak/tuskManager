@@ -2,7 +2,7 @@
 //! performance counters that Task Manager also shows, and per-process network from an event trace
 //! that only works with admin rights.
 
-use crate::{Gpu, Proc, Sample, Total, Usage};
+use crate::{Details, Gpu, Proc, Sample, Total, Usage};
 use std::{
     collections::HashMap,
     ffi::c_void,
@@ -14,7 +14,7 @@ use std::{
     time::Instant,
 };
 use windows::{
-    Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemProcessInformation, SystemProcessorPerformanceInformation},
+    Wdk::System::SystemInformation::{NtQuerySystemInformation, SYSTEM_INFORMATION_CLASS, SystemProcessInformation, SystemProcessorPerformanceInformation},
     Win32::{
         Foundation::{CloseHandle, ERROR_ACCESS_DENIED, ERROR_SUCCESS, FALSE, HANDLE, HWND, LPARAM, POINT, RECT, STATUS_INFO_LENGTH_MISMATCH, TRUE, UNICODE_STRING},
         Graphics::{
@@ -36,8 +36,9 @@ use windows::{
                 PDH_CSTATUS_NEW_DATA, PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_LARGE, PDH_HCOUNTER, PDH_HQUERY, PDH_MORE_DATA, PdhAddEnglishCounterW,
                 PdhCollectQueryData, PdhGetFormattedCounterArrayW, PdhOpenQueryW,
             },
-            SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX},
-            Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_TERMINATE, TerminateProcess},
+            Registry::{HKEY_LOCAL_MACHINE, REG_ROUTINE_FLAGS, RRF_RT_REG_MULTI_SZ, RRF_RT_REG_SZ, RegGetValueW},
+            SystemInformation::{GetLogicalProcessorInformationEx, GlobalMemoryStatusEx, MEMORYSTATUSEX, RelationProcessorCore},
+            Threading::{ALL_PROCESSOR_GROUPS, GetActiveProcessorCount, GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_TERMINATE, TerminateProcess},
             WindowsProgramming::SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION,
         },
         UI::{
@@ -121,6 +122,7 @@ pub struct Sampler {
     net_bytes: HashMap<u32, u64>,
     /// The previous bytes over all network interfaces.
     iface_bytes: Option<u64>,
+    details: Details,
     prepared: bool,
     last: Instant,
 }
@@ -137,6 +139,7 @@ impl Sampler {
             net: None,
             net_bytes: HashMap::new(),
             iface_bytes: None,
+            details: Details::default(),
             prepared: false,
             last: Instant::now(),
         }
@@ -148,6 +151,7 @@ impl Sampler {
         if !self.prepared {
             self.gpus = Gpus::new();
             self.net = NetTrace::new();
+            self.details.cpu = cpu_info();
             self.prepared = true;
         }
     }
@@ -228,7 +232,9 @@ impl Sampler {
         let net = rate(self.iface_bytes.map(|prev| octets.saturating_sub(prev)).unwrap_or(0), secs);
         self.iface_bytes = Some(octets);
         let cores = self.cpu_cores();
-        Sample { ram, commit, gpus, procs, net, net_per_process: self.net.is_some(), cores }
+        // Re-read every sample since a page file that Windows manages grows and shrinks.
+        self.details.pagefile = pagefile_info();
+        Sample { ram, commit, gpus, procs, net, net_per_process: self.net.is_some(), cores, details: self.details.clone() }
     }
 
     /// The busy share of each CPU core over the interval, where its kernel time counts idle time too.
@@ -402,6 +408,97 @@ fn memory() -> (Total, Total) {
     let ram = Total { used: status.ullTotalPhys - status.ullAvailPhys, total: status.ullTotalPhys };
     let commit = Total { used: status.ullTotalPageFile - status.ullAvailPageFile, total: status.ullTotalPageFile };
     (ram, commit)
+}
+
+/// The CPU's name with its core and thread counts.
+fn cpu_info() -> String {
+    let name = registry(w!("HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0"), w!("ProcessorNameString"), RRF_RT_REG_SZ)
+        .map(|name| String::from_utf16_lossy(&name).trim_matches(['\0', ' ']).to_owned())
+        .unwrap_or_default();
+    let threads = unsafe { GetActiveProcessorCount(ALL_PROCESSOR_GROUPS) };
+    format!("{name}, {} cores / {threads} threads", physical_cores())
+}
+
+/// How many physical cores there are, as the kernel lists one processor-core entry per core.
+fn physical_cores() -> usize {
+    let mut len = 0;
+    _ = unsafe { GetLogicalProcessorInformationEx(RelationProcessorCore, None, &mut len) };
+    let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+    if unsafe { GetLogicalProcessorInformationEx(RelationProcessorCore, Some(buf.as_mut_ptr().cast()), &mut len) }.is_err() {
+        return 0;
+    }
+    let bytes = unsafe { slice::from_raw_parts(buf.as_ptr().cast::<u8>(), len as usize) };
+    let (mut cores, mut offset) = (0, 0);
+    // Each entry starts with its relationship, then its own size in bytes.
+    while let Some(size) = bytes.get(offset + 4..offset + 8).map(|size| u32::from_le_bytes(size.try_into().unwrap()) as usize).filter(|&size| size > 0) {
+        cores += 1;
+        offset += size;
+    }
+    cores
+}
+
+/// The start of SYSTEM_PAGEFILE_INFORMATION, one entry per page file.
+#[repr(C)]
+struct PageFileInfo {
+    next_entry_offset: u32,
+    /// In pages.
+    total_size: u32,
+}
+
+/// The page file's current size, and whether it's fixed or grows.
+fn pagefile_info() -> String {
+    // SystemPageFileInformation, which the bindings don't name.
+    const PAGE_FILES: SYSTEM_INFORMATION_CLASS = SYSTEM_INFORMATION_CLASS(18);
+    // Windows uses 4 KB pages on every architecture it runs on.
+    const PAGE: u64 = 4096;
+    let mut buf = vec![0u64; 512];
+    let mut needed = 0;
+    let mut pages = 0;
+    if unsafe { NtQuerySystemInformation(PAGE_FILES, buf.as_mut_ptr().cast(), (buf.len() * 8) as u32, &mut needed) }.is_ok() && needed > 0 {
+        let mut offset = 0;
+        loop {
+            // SAFETY: the kernel wrote the entries back to back, each one at the offset that the previous one gives.
+            let info = unsafe { &*buf.as_ptr().cast::<u8>().add(offset).cast::<PageFileInfo>() };
+            pages += u64::from(info.total_size);
+            if info.next_entry_offset == 0 {
+                break;
+            }
+            offset += info.next_entry_offset as usize;
+        }
+    }
+    if pages == 0 {
+        return "No page file".to_owned();
+    }
+    let size = crate::size(pages * PAGE);
+    // Entries like "C:\pagefile.sys 4096 8192", with the initial and maximum sizes in MB.
+    let Some(file) = registry(w!("SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management"), w!("PagingFiles"), RRF_RT_REG_MULTI_SZ)
+        .and_then(|files| String::from_utf16_lossy(&files).split('\0').find(|file| !file.is_empty()).map(str::to_owned))
+    else {
+        return format!("Page file {size}");
+    };
+    let mut limits = file.split_whitespace().skip(1).map(|mb| mb.parse::<u64>().unwrap_or(0));
+    let (initial, max) = (limits.next().unwrap_or(0), limits.next().unwrap_or(0));
+    // Without sizes, or with zero ones, Windows manages it.
+    let mode = match (initial, max) {
+        (_, 0) => "auto-growing".to_owned(),
+        (initial, max) if initial == max => "fixed".to_owned(),
+        (_, max) => format!("grows to {}", crate::size(max << 20)),
+    };
+    format!("Page file {size}, {mode}")
+}
+
+/// A string or multi-string value under HKEY_LOCAL_MACHINE, as UTF-16 including its terminating nulls.
+fn registry(key: PCWSTR, value: PCWSTR, kind: REG_ROUTINE_FLAGS) -> Option<Vec<u16>> {
+    let mut size = 0u32;
+    if unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, key, value, kind, None, None, Some(&raw mut size)) } != ERROR_SUCCESS {
+        return None;
+    }
+    let mut buf = vec![0u16; size as usize / 2];
+    if unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, key, value, kind, None, Some(buf.as_mut_ptr().cast()), Some(&raw mut size)) } != ERROR_SUCCESS {
+        return None;
+    }
+    buf.truncate(size as usize / 2);
+    Some(buf)
 }
 
 /// The bytes sent and received over all real network interfaces, so far.

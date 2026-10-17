@@ -41,7 +41,7 @@ const VRAM_TIP: &str = "Video memory";
 const DISK_TIP: &str = "Read + write speed";
 const NET_TIP: &str = "Send + receive speed (needs admin)";
 /// What the "10s" mark on a value column sorted by its recent peak means.
-const PEAK_TIP: &str = "10s = 10-second peak";
+const PEAK_TIP: &str = "10s: sorted by 10s peak (faint bar), shows current";
 
 /// What a process uses, or all the processes of a program.
 #[derive(Default)]
@@ -112,6 +112,16 @@ pub struct Sample {
     pub net_per_process: bool,
     /// The busy share of each CPU core, in percent.
     pub cores: Vec<f32>,
+    pub details: Details,
+}
+
+/// Hardware facts for the column tooltips, empty until known.
+#[derive(Default, Clone)]
+pub struct Details {
+    /// The CPU's name with its core and thread counts.
+    pub cpu: String,
+    /// The page file's size, and whether it's fixed or grows.
+    pub pagefile: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -358,7 +368,15 @@ impl App {
                 for (col, title, tip) in &cols {
                     header.col(|ui| {
                         // A click anywhere in the header cell sorts, and hovering it explains the column; added first so the search box on top still gets its own clicks.
-                        let tooltip = if *col == Col::Name { tip.clone() } else { format!("{tip}\n{PEAK_TIP}") };
+                        let details = &self.sample.details;
+                        let detail = match col {
+                            Col::Cpu | Col::Core => details.cpu.as_str(),
+                            Col::Commit => details.pagefile.as_str(),
+                            Col::Vram(gpu) => self.sample.gpus.get(*gpu).map_or("", |gpu| gpu.name.as_str()),
+                            _ => "",
+                        };
+                        let peak = if *col == Col::Name { "" } else { PEAK_TIP };
+                        let tooltip = [tip.as_str(), detail, peak].into_iter().filter(|line| !line.is_empty()).collect::<Vec<_>>().join("\n");
                         let cell = ui.interact(ui.max_rect(), ui.id().with("sort"), egui::Sense::click()).on_hover_text(tooltip);
                         let align = if *col == Col::Name { egui::Align::Min } else { egui::Align::Max };
                         ui.with_layout(egui::Layout::top_down(align), |ui| {
