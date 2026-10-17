@@ -50,6 +50,8 @@ const PEAK_TIP: &str = "10s: sorted by 10s peak (faint bar), shows current";
 pub struct Usage {
     /// Physical memory that only the process uses.
     pub ram: u64,
+    /// Physical memory the process shares with others, like loaded DLLs and mapped files, on top of `ram`.
+    pub shared: u64,
     /// Memory that only the process uses, also counting what was moved out of RAM.
     pub commit: u64,
     /// Dedicated video memory used on each GPU of `Sample::gpus`, missing ones being zero.
@@ -67,6 +69,7 @@ pub struct Usage {
 impl Usage {
     fn add(&mut self, other: &Usage) {
         self.ram += other.ram;
+        self.shared += other.shared;
         self.commit += other.commit;
         self.vram.resize(self.vram.len().max(other.vram.len()), 0);
         for (sum, vram) in self.vram.iter_mut().zip(&other.vram) {
@@ -420,8 +423,12 @@ impl App {
                                 }
                                 _ => match col.total(&self.sample).filter(|total| total.total > 0) {
                                     Some(total) => {
-                                        let contrib = hovered_usage.map(|usage| col.value(usage) as f32 / total.total as f32).unwrap_or(0.0);
-                                        total_bar(ui, total.used as f32 / total.total as f32, faint(total.total as f64), contrib, used_of(total));
+                                        // Windows counts memory that programs share, like GPU surfaces, in each of them, so their sum can top
+                                        // what's really used; the highlights shrink to fit so the whole list lands on the used total.
+                                        let listed: f64 = self.sample.procs.iter().map(|proc| col.value(&proc.usage)).sum();
+                                        let fit = if listed > total.used as f64 { total.used as f64 / listed } else { 1.0 };
+                                        let contrib = hovered_usage.map(|usage| (col.value(usage) * fit) as f32 / total.total as f32).unwrap_or(0.0);
+                                        total_bar(ui, total.used as f32 / total.total as f32, faint(total.total as f64 / fit), contrib, used_of(total));
                                     }
                                     None => total_bar(ui, 0.0, 0.0, 0.0, String::new()),
                                 },
@@ -524,7 +531,13 @@ impl App {
                                 paint_bar(ui, rect, (peak / col_max[i]) as f32, FAINT);
                                 paint_bar(ui, rect, (current / col_max[i]) as f32, BAR);
                             }
-                            ui.with_layout(right, |ui| ui.label(col.text(usage)));
+                            ui.with_layout(right, |ui| {
+                                ui.label(col.text(usage));
+                                // The memory a program shares with others, which its own figure leaves out.
+                                if *col == Col::Ram && usage.shared > 0 {
+                                    ui.label(egui::RichText::new(format!("(shared {})", size(usage.shared))).small().weak());
+                                }
+                            });
                         });
                     }
                     if let Some(group) = group
@@ -767,7 +780,7 @@ fn exe_dir() -> PathBuf {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         // Releases are plain numbers, but Cargo needs x.y.z, so only the major part is shown.
-        viewport: egui::ViewportBuilder::default().with_title(concat!("tuskManager v", env!("CARGO_PKG_VERSION_MAJOR"))).with_inner_size([950.0, 450.0]),
+        viewport: egui::ViewportBuilder::default().with_title(concat!("tuskManager v", env!("CARGO_PKG_VERSION_MAJOR"))).with_inner_size([1050.0, 450.0]),
         // Without a path eframe keeps its window record in the user's app data; here it sits next to the exe.
         persistence_path: Some(exe_dir().join("data").join("window.ron")),
         ..Default::default()

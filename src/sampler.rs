@@ -72,7 +72,7 @@ struct ProcessInfo {
     _virtual_size: usize,
     _page_fault_count: u32,
     _peak_working_set_size: usize,
-    _working_set_size: usize,
+    working_set_size: usize,
     _quota_peak_paged_pool_usage: usize,
     _quota_paged_pool_usage: usize,
     _quota_peak_non_paged_pool_usage: usize,
@@ -204,6 +204,7 @@ impl Sampler {
                     }
                     let usage = Usage {
                         ram: info.working_set_private_size,
+                        shared: (info.working_set_size as u64).saturating_sub(info.working_set_private_size),
                         commit: info.pagefile_usage as u64,
                         vram: vram.remove(&pid).unwrap_or_default(),
                         cpu: 0.0,
