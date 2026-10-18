@@ -38,10 +38,10 @@ const CORE_BAR: egui::Color32 = egui::Color32::from_rgb(90, 140, 210);
 const SYSTEM_TEXT: egui::Color32 = egui::Color32::from_rgb(130, 180, 245);
 /// How far the shared-RAM figure sits left of the cell's right edge, so the "sh" numbers line up down the column.
 const SH_INSET: f32 = 58.0;
-/// A faint wash over the column under the pointer, hinting it can be clicked to sort.
-const HOVER_COL: egui::Color32 = egui::Color32::from_rgba_premultiplied(13, 13, 13, 13);
-/// A soft, full-height wash marking the sorted column, gentler than a hard white frame.
-const SORTED_COL: egui::Color32 = egui::Color32::from_rgba_premultiplied(24, 24, 24, 24);
+/// The brighter wash, for the column under the pointer: a clear, transient hint that it can be clicked to sort.
+const HOVER_COL: egui::Color32 = egui::Color32::from_rgba_premultiplied(24, 24, 24, 24);
+/// The subtler wash marking the sorted column: a gentle, lasting mark that doesn't distract.
+const SORTED_COL: egui::Color32 = egui::Color32::from_rgba_premultiplied(13, 13, 13, 13);
 const NAME_TIP: &str = "Programs by executable, and memory no program owns";
 const RAM_TIP: &str = "Private RAM. The smaller \"sh\" figure is RAM shared with other programs, not counted in the main number";
 const COMMIT_TIP: &str = "Private RAM + page file";
@@ -484,13 +484,17 @@ impl App {
                         Row::Proc(proc) => (&proc.usage, None),
                     };
                     let mut acted = false;
+                    // Whether the pointer is anywhere in this row's full-width band; shared so every cell highlights, not just the name.
+                    // Asked of the context, since a cell's own check clips to the cell; only the row's visible height counts.
+                    let mut row_hovered = false;
                     row.col(|ui| {
-                        paint_col_tint(ui, self.sort == Col::Name, col_hover == Some(0));
-                        // Hovering anywhere in the row (its full-width band) reveals the end buttons and highlights its header share.
-                        // Asked of the context, since the cell's own check clips to the cell; only the row's visible height counts.
                         let band = egui::Rect::from_x_y_ranges(table_x, ui.clip_rect().y_range());
-                        let hovered = ui.ctx().rect_contains_pointer(ui.layer_id(), band);
-                        if hovered {
+                        row_hovered = ui.ctx().rect_contains_pointer(ui.layer_id(), band);
+                        if row_hovered {
+                            paint_row_hover(ui);
+                        }
+                        paint_col_tint(ui, self.sort == Col::Name, col_hover == Some(0));
+                        if row_hovered {
                             now_hovered = Some(match rows[index] {
                                 Row::Group(group) => group.name.to_owned(),
                                 Row::Proc(proc) => proc.name.clone(),
@@ -522,7 +526,7 @@ impl App {
                                 }
                             },
                             |ui| {
-                                if !hovered {
+                                if !row_hovered {
                                     return;
                                 }
                                 let (pids, what) = match rows[index] {
@@ -546,6 +550,9 @@ impl App {
                     });
                     for (i, (col, ..)) in cols.iter().enumerate().skip(1) {
                         row.col(|ui| {
+                            if row_hovered {
+                                paint_row_hover(ui);
+                            }
                             paint_col_tint(ui, self.sort == *col, Some(i) == col_hover);
                             // The Network column is empty without admin rights, so the prompt to get them goes there.
                             if *col == Col::Net && self.offer_admin {
@@ -743,6 +750,12 @@ fn admin_prompt(ui: &mut egui::Ui, row: usize, relaunch: &mut bool) {
         }
         _ => {}
     }
+}
+
+/// Fills a cell with the theme's row-hover color, so hovering anywhere in a row highlights the whole row.
+fn paint_row_hover(ui: &egui::Ui) {
+    let rect = ui.max_rect().expand2(0.5 * ui.spacing().item_spacing);
+    ui.painter().rect_filled(rect, egui::CornerRadius::ZERO, ui.visuals().widgets.hovered.bg_fill);
 }
 
 /// Washes a cell's full width, out to the column dividers, to mark the sorted column and the one under the pointer.
