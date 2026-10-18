@@ -36,8 +36,10 @@ const HOT: egui::Color32 = egui::Color32::from_rgb(170, 60, 55);
 const CORE_BAR: egui::Color32 = egui::Color32::from_rgb(90, 140, 210);
 /// The names of the rows of memory that no program owns, like the kernel's pools.
 const SYSTEM_TEXT: egui::Color32 = egui::Color32::from_rgb(130, 180, 245);
+/// How far the shared-RAM figure sits left of the cell's right edge, so the "sh" numbers line up down the column.
+const SH_INSET: f32 = 58.0;
 const NAME_TIP: &str = "Programs by executable, and memory no program owns";
-const RAM_TIP: &str = "Private RAM";
+const RAM_TIP: &str = "Private RAM. The smaller \"sh\" figure is RAM shared with other programs, not counted in the main number";
 const COMMIT_TIP: &str = "Private RAM + page file";
 const CPU_TIP: &str = "Overall use";
 const CORE_TIP: &str = "Max single-core use";
@@ -45,7 +47,7 @@ const VRAM_TIP: &str = "Video memory";
 const DISK_TIP: &str = "Read + write speed";
 const NET_TIP: &str = "Send + receive speed (needs admin)";
 /// What the "10s" mark on a value column sorted by its recent peak means.
-const PEAK_TIP: &str = "10s: sorted by 10s peak (faint bar), shows current";
+const PEAK_TIP: &str = "The \"10s\" mark means sorted by each program's highest value over the last 10 seconds (the faint bar); the number shows the current value";
 
 /// What a process uses, or all the processes of a program.
 #[derive(Default)]
@@ -368,17 +370,22 @@ impl App {
         ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
         // The table's horizontal span, to detect hovering a whole row, not just its first cell.
         let table_x = ui.max_rect().x_range();
-        TableBuilder::new(ui)
+        let mut builder = TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
             .sense(egui::Sense::click())
             .scroll_bar_visibility(ScrollBarVisibility::AlwaysVisible)
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            // Only a remainder column that isn't resizable keeps filling the table as the window resizes.
-            .column(Column::remainder().at_least(150.0).clip(true).resizable(false))
-            .columns(Column::initial(95.0).at_least(50.0), cols.len() - 2)
-            // The last column isn't resizable, so its right edge can't be grabbed by mistake instead of the scroll bar.
-            .column(Column::initial(95.0).at_least(50.0).resizable(false))
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+        // Only a remainder column that isn't resizable keeps filling the table as the window resizes.
+        builder = builder.column(Column::remainder().at_least(150.0).clip(true).resizable(false));
+        // The middle columns, with RAM wider to fit its aligned "sh" sub-column beside the main figure.
+        for (col, ..) in &cols[1..cols.len() - 1] {
+            let width = if *col == Col::Ram { 150.0 } else { 95.0 };
+            builder = builder.column(Column::initial(width).at_least(50.0));
+        }
+        // The last column isn't resizable, so its right edge can't be grabbed by mistake instead of the scroll bar.
+        builder = builder.column(Column::initial(95.0).at_least(50.0).resizable(false));
+        builder
             .header(header_height, |mut header| {
                 for (col, title, tip) in &cols {
                     header.col(|ui| {
@@ -533,13 +540,17 @@ impl App {
                                 paint_bar(ui, rect, (peak / col_max[i]) as f32, FAINT);
                                 paint_bar(ui, rect, (current / col_max[i]) as f32, BAR);
                             }
-                            ui.with_layout(right, |ui| {
-                                ui.label(col.text(usage));
-                                // The memory a program shares with others, which its own figure leaves out.
-                                if *col == Col::Ram && usage.shared > 0 {
-                                    ui.label(egui::RichText::new(format!("{}(sh)", size(usage.shared))).small());
-                                }
-                            });
+                            if *col == Col::Ram && usage.shared > 0 {
+                                // Paint both figures directly so the "sh" numbers line up down the column, main value at the right edge.
+                                let rect = ui.max_rect();
+                                let gap = ui.spacing().item_spacing.x;
+                                let color = ui.visuals().text_color();
+                                let right_center = egui::Align2::RIGHT_CENTER;
+                                ui.painter().text(egui::pos2(rect.right() - gap, rect.center().y), right_center, col.text(usage), egui::TextStyle::Button.resolve(ui.style()), color);
+                                ui.painter().text(egui::pos2(rect.right() - gap - SH_INSET, rect.center().y), right_center, format!("{} sh", size(usage.shared)), egui::TextStyle::Small.resolve(ui.style()), color);
+                            } else {
+                                ui.with_layout(right, |ui| ui.label(col.text(usage)));
+                            }
                         });
                     }
                     if let Some(group) = group
