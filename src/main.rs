@@ -228,6 +228,8 @@ struct App {
     history: VecDeque<HashMap<String, Usage>>,
     /// Whether to offer relaunching as admin, which per-process network needs.
     offer_admin: bool,
+    /// Whether Ctrl+Shift+Esc currently opens this program instead of Task Manager.
+    default_tm: bool,
     /// Whether the window has been confirmed on a monitor, so the off-screen check can stop.
     placed: bool,
     /// Each column's horizontal span from the last frame, to tell which column the pointer is over.
@@ -278,6 +280,7 @@ impl App {
             hovered: None,
             history: VecDeque::new(),
             offer_admin: sampler::offer_admin(),
+            default_tm: sampler::is_default_task_manager(),
             placed: false,
             col_ranges: Vec::new(),
             window: cc.storage.and_then(|storage| eframe::get_value(storage, WINDOW_KEY)),
@@ -382,6 +385,8 @@ impl App {
         };
 
         let (mut sort, mut toggle, mut relaunch, mut kill, mut now_hovered) = (None, None, false, None, None);
+        // Set when the top-row buttons are clicked: launch Task Manager, or toggle whether we replace it.
+        let (mut launch_tm, mut set_default) = (false, None);
         let height = ui.spacing().interact_size.y;
         // The totals or filter on top, the sortable title below.
         let header_height = 2.0 * (height + ui.spacing().item_spacing.y);
@@ -469,7 +474,30 @@ impl App {
                             }
                             // Plain text, not a button: the whole header cell handles the click to sort and the tooltip.
                             let arrow = sort_arrow(self.sort == *col, *col, self.alt);
-                            ui.label(format!("{title}{arrow}"));
+                            if *col == Col::Name {
+                                // The launch and replace buttons sit in the empty space beside the "Name" title, costing no extra height.
+                                egui::containers::Sides::new().show(
+                                    ui,
+                                    |ui| {
+                                        ui.label(format!("{title}{arrow}"));
+                                    },
+                                    |ui| {
+                                        if ui.button("Task Mgr").on_hover_text("Open the built-in Windows Task Manager").clicked() {
+                                            launch_tm = true;
+                                        }
+                                        let (label, tip) = if self.default_tm {
+                                            ("Default \u{2713}", "tuskManager opens on Ctrl+Shift+Esc; click to restore Windows Task Manager (needs admin)")
+                                        } else {
+                                            ("Set default", "Open tuskManager on Ctrl+Shift+Esc instead of Task Manager (needs admin)")
+                                        };
+                                        if ui.button(label).on_hover_text(tip).clicked() {
+                                            set_default = Some(!self.default_tm);
+                                        }
+                                    },
+                                );
+                            } else {
+                                ui.label(format!("{title}{arrow}"));
+                            }
                         });
                         if cell.clicked() {
                             sort = Some(*col);
@@ -619,6 +647,14 @@ impl App {
         if let Some(pids) = kill {
             sampler::end(&pids);
         }
+        if launch_tm {
+            sampler::launch_task_manager();
+        }
+        if let Some(enable) = set_default {
+            sampler::set_default_task_manager(enable);
+            // The elevated edit runs in the background; assume it took, and re-check it each sample.
+            self.default_tm = enable;
+        }
     }
 }
 
@@ -654,6 +690,8 @@ impl eframe::App for App {
         }
         if let Some(sample) = self.rx.try_iter().last() {
             self.sample = sample;
+            // Cheap, and keeps the button right if the setting changed elsewhere or a prompt was cancelled.
+            self.default_tm = sampler::is_default_task_manager();
             let mut snapshot: HashMap<String, Usage> = HashMap::new();
             for proc in &self.sample.procs {
                 snapshot.entry(proc.name.clone()).or_default().add(&proc.usage);

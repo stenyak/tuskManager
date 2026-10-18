@@ -43,7 +43,7 @@ use windows::{
         },
         UI::{
             Shell::ShellExecuteW,
-            WindowsAndMessaging::{EnumWindows, GetCursorPos, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible, SW_SHOWNORMAL, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos},
+            WindowsAndMessaging::{EnumWindows, GetCursorPos, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible, SW_HIDE, SW_SHOWNORMAL, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos},
         },
     },
     core::{BOOL, GUID, PCWSTR, PWSTR, w},
@@ -838,4 +838,43 @@ pub fn relaunch_as_admin() {
     let Ok(exe) = std::env::current_exe() else { return };
     let exe: Vec<u16> = exe.as_os_str().encode_wide().chain([0]).collect();
     unsafe { ShellExecuteW(None, w!("runas"), PCWSTR(exe.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
+}
+
+/// The debugger key Windows checks whenever taskmgr.exe launches, including on Ctrl+Shift+Esc.
+const TASKMGR_IFEO: PCWSTR = w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\taskmgr.exe");
+
+/// Whether Ctrl+Shift+Esc currently opens this program instead of Windows Task Manager.
+pub fn is_default_task_manager() -> bool {
+    let Some(buf) = registry(TASKMGR_IFEO, w!("Debugger"), RRF_RT_REG_SZ) else { return false };
+    let debugger = String::from_utf16_lossy(&buf);
+    let debugger = debugger.trim_matches(['\0', ' ', '"']).to_ascii_lowercase();
+    std::env::current_exe().map(|exe| exe.to_string_lossy().to_ascii_lowercase() == debugger).unwrap_or(false)
+}
+
+/// Makes Ctrl+Shift+Esc open this program, or restores Task Manager, by setting the debugger key, which needs admin rights.
+pub fn set_default_task_manager(enable: bool) {
+    let key = r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\taskmgr.exe";
+    let command = if enable {
+        format!(r#"add "{key}" /v Debugger /t REG_SZ /d "{}" /f"#, std::env::current_exe().unwrap_or_default().display())
+    } else {
+        format!(r#"delete "{key}" /v Debugger /f"#)
+    };
+    let command: Vec<u16> = command.encode_utf16().chain([0]).collect();
+    unsafe { ShellExecuteW(None, w!("runas"), w!("reg.exe"), PCWSTR(command.as_ptr()), PCWSTR::null(), SW_HIDE) };
+}
+
+/// Opens Windows Task Manager, side-stepping our own interception when we are the default.
+pub fn launch_task_manager() {
+    // A copy under another name isn't matched by the debugger key, so it starts the real Task Manager.
+    if is_default_task_manager()
+        && let Ok(root) = std::env::var("SystemRoot")
+    {
+        let dst = std::env::temp_dir().join("WindowsTaskManager.exe");
+        if std::fs::copy(std::path::Path::new(&root).join("System32").join("taskmgr.exe"), &dst).is_ok() {
+            let path: Vec<u16> = dst.as_os_str().encode_wide().chain([0]).collect();
+            unsafe { ShellExecuteW(None, w!("open"), PCWSTR(path.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
+            return;
+        }
+    }
+    unsafe { ShellExecuteW(None, w!("open"), w!("taskmgr.exe"), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
 }
