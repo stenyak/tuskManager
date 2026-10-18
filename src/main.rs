@@ -37,7 +37,7 @@ const CORE_BAR: egui::Color32 = egui::Color32::from_rgb(90, 140, 210);
 /// The names of the rows of memory that no program owns, like the kernel's pools.
 const SYSTEM_TEXT: egui::Color32 = egui::Color32::from_rgb(130, 180, 245);
 /// How far the shared-RAM figure sits left of the cell's right edge, so the "sh" numbers line up down the column.
-const SH_INSET: f32 = 58.0;
+const SH_INSET: f32 = 44.0;
 /// The lines down a hovered column's left and right edges: a clear, transient hint it can be clicked to sort.
 const HOVER_BORDER: egui::Color32 = egui::Color32::from_gray(150);
 /// The subtle wash marking the sorted column: a gentle, lasting mark that doesn't distract.
@@ -411,7 +411,7 @@ impl App {
         builder = builder.column(Column::remainder().at_least(150.0).clip(true).resizable(false));
         // The middle columns, with RAM wider to fit its aligned "sh" sub-column beside the main figure.
         for (col, ..) in &cols[1..cols.len() - 1] {
-            let width = if *col == Col::Ram { 150.0 } else { 95.0 };
+            let width = if *col == Col::Ram { 105.0 } else { 95.0 };
             builder = builder.column(Column::initial(width).at_least(50.0));
         }
         // The last column isn't resizable, so its right edge can't be grabbed by mistake instead of the scroll bar.
