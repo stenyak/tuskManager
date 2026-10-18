@@ -38,9 +38,9 @@ const CORE_BAR: egui::Color32 = egui::Color32::from_rgb(90, 140, 210);
 const SYSTEM_TEXT: egui::Color32 = egui::Color32::from_rgb(130, 180, 245);
 /// How far the shared-RAM figure sits left of the cell's right edge, so the "sh" numbers line up down the column.
 const SH_INSET: f32 = 58.0;
-/// The brighter wash, for the column under the pointer: a clear, transient hint that it can be clicked to sort.
-const HOVER_COL: egui::Color32 = egui::Color32::from_rgba_premultiplied(24, 24, 24, 24);
-/// The subtler wash marking the sorted column: a gentle, lasting mark that doesn't distract.
+/// The lines down a hovered column's left and right edges: a clear, transient hint it can be clicked to sort.
+const HOVER_BORDER: egui::Color32 = egui::Color32::from_gray(150);
+/// The subtle wash marking the sorted column: a gentle, lasting mark that doesn't distract.
 const SORTED_COL: egui::Color32 = egui::Color32::from_rgba_premultiplied(13, 13, 13, 13);
 const NAME_TIP: &str = "Programs by executable, and memory no program owns";
 const RAM_TIP: &str = "Private RAM. The smaller \"sh\" figure is RAM shared with other programs, not counted in the main number";
@@ -390,8 +390,9 @@ impl App {
         ui.style_mut().interaction.selectable_labels = false;
         // A regular, always-present scroll bar rather than a thin overlay one.
         ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
-        // The table's horizontal span, to detect hovering a whole row, not just its first cell.
+        // The table's horizontal span, to detect hovering a whole row, and its vertical span, to draw the hovered column's edges.
         let table_x = ui.max_rect().x_range();
+        let table_y = ui.max_rect().y_range();
         // Each column's explanation, and which column the pointer is over, using last frame's spans since this frame's come from rendering.
         let col_tips: Vec<String> = cols.iter().map(|(col, _, tip)| self.column_tip(*col, tip)).collect();
         let col_hover = ui
@@ -421,7 +422,7 @@ impl App {
                     header.col(|ui| {
                         // Remember this column's span for next frame's pointer test, and wash the sorted and hovered columns.
                         col_ranges[i] = ui.max_rect().expand2(0.5 * ui.spacing().item_spacing).x_range();
-                        paint_col_tint(ui, self.sort == *col, Some(i) == col_hover);
+                        paint_col_tint(ui, self.sort == *col);
                         // A click anywhere in the header cell sorts, and hovering it explains the column; added first so the search box on top still gets its own clicks.
                         let cell = ui.interact(ui.max_rect(), ui.id().with("sort"), egui::Sense::click()).on_hover_text(col_tips[i].clone());
                         let align = if *col == Col::Name { egui::Align::Min } else { egui::Align::Max };
@@ -493,7 +494,7 @@ impl App {
                         if row_hovered {
                             paint_row_hover(ui);
                         }
-                        paint_col_tint(ui, self.sort == Col::Name, col_hover == Some(0));
+                        paint_col_tint(ui, self.sort == Col::Name);
                         if row_hovered {
                             now_hovered = Some(match rows[index] {
                                 Row::Group(group) => group.name.to_owned(),
@@ -553,7 +554,7 @@ impl App {
                             if row_hovered {
                                 paint_row_hover(ui);
                             }
-                            paint_col_tint(ui, self.sort == *col, Some(i) == col_hover);
+                            paint_col_tint(ui, self.sort == *col);
                             // The Network column is empty without admin rights, so the prompt to get them goes there.
                             if *col == Col::Net && self.offer_admin {
                                 admin_prompt(ui, index, &mut relaunch);
@@ -594,6 +595,12 @@ impl App {
             });
 
         self.col_ranges = col_ranges;
+        // Outline the hovered column down its left and right edges, on top of the whole table so nothing hides the lines.
+        if let Some(range) = col_hover.and_then(|i| self.col_ranges.get(i).copied()) {
+            let stroke = egui::Stroke::new(1.0, HOVER_BORDER);
+            ui.painter().vline(range.min, table_y, stroke);
+            ui.painter().vline(range.max, table_y, stroke);
+        }
         self.hovered = now_hovered;
         if let Some(col) = sort {
             // A new column starts by its recent peak (names A to Z); clicking it again flips to the current value (names Z to A).
@@ -758,14 +765,11 @@ fn paint_row_hover(ui: &egui::Ui) {
     ui.painter().rect_filled(rect, egui::CornerRadius::ZERO, ui.visuals().widgets.hovered.bg_fill);
 }
 
-/// Washes a cell's full width, out to the column dividers, to mark the sorted column and the one under the pointer.
-fn paint_col_tint(ui: &egui::Ui, selected: bool, hovered: bool) {
-    let rect = ui.max_rect().expand2(0.5 * ui.spacing().item_spacing);
+/// Washes the sorted column, out to the column dividers, behind its content.
+fn paint_col_tint(ui: &egui::Ui, selected: bool) {
     if selected {
+        let rect = ui.max_rect().expand2(0.5 * ui.spacing().item_spacing);
         ui.painter().rect_filled(rect, egui::CornerRadius::ZERO, SORTED_COL);
-    }
-    if hovered {
-        ui.painter().rect_filled(rect, egui::CornerRadius::ZERO, HOVER_COL);
     }
 }
 
