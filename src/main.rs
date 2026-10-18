@@ -398,22 +398,36 @@ impl App {
         ui.style_mut().interaction.selectable_labels = false;
         // A regular, always-present scroll bar rather than a thin overlay one.
         ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
-        // A slim toolbar above the table: replace Task Manager, and open the built-in tools.
+        // A slim toolbar above the table, kept to the right: admin and the built-in tools, then the replace toggle on the right border.
         ui.horizontal(|ui| {
-            let (label, tip) = if self.default_tm {
-                ("Unset default", "Stop replacing Task Manager; restore the Windows default (needs admin)")
-            } else {
-                ("Set default", "Open tuskManager on Ctrl+Shift+Esc instead of Task Manager (needs admin)")
-            };
-            if ui.button(label).on_hover_text(tip).clicked() {
-                set_default = Some(!self.default_tm);
-            }
-            if ui.button("Task Manager").on_hover_text("Open the built-in Windows Task Manager").clicked() {
-                launch_tm = true;
-            }
-            if ui.button("Resource Monitor").on_hover_text("Open the built-in Windows Resource Monitor").clicked() {
-                launch_resmon = true;
-            }
+            ui.with_layout(right, |ui| {
+                let (label, tip) = if self.default_tm {
+                    ("Unset default", "Stop replacing Task Manager; restore the Windows default (needs admin)")
+                } else {
+                    ("Set default", "Open tuskManager on Ctrl+Shift+Esc instead of Task Manager (needs admin)")
+                };
+                // The replace toggle sits on the right border; once we are already the default, fade it so it does not stand out.
+                ui.scope(|ui| {
+                    if self.default_tm {
+                        ui.set_opacity(0.6);
+                    }
+                    if ui.button(label).on_hover_text(tip).clicked() {
+                        set_default = Some(!self.default_tm);
+                    }
+                });
+                if ui.button("Resource Monitor").on_hover_text("Open the built-in Windows Resource Monitor").clicked() {
+                    launch_resmon = true;
+                }
+                if ui.button("Task Manager").on_hover_text("Open the built-in Windows Task Manager").clicked() {
+                    launch_tm = true;
+                }
+                // Without admin the Network column stays empty, so offer the elevated relaunch here too.
+                if self.offer_admin
+                    && ui.button("Run as admin").on_hover_text("Relaunch with admin rights to show each program's network use").clicked()
+                {
+                    relaunch = true;
+                }
+            });
         });
         // The table's horizontal span, to detect hovering a whole row, and its vertical span (below the toolbar), to draw the hovered column's edges.
         let table_x = ui.max_rect().x_range();
