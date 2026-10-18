@@ -241,6 +241,8 @@ impl App {
     fn new(cc: &eframe::CreationContext) -> Self {
         let (tx, rx) = mpsc::channel();
         let ctx = cc.egui_ctx.clone();
+        // The bars, washes and near-white text all assume a dark background, so force it whatever the system theme is.
+        ctx.set_theme(egui::ThemePreference::Dark);
         ctx.all_styles_mut(|style| {
             // Near-white text, brighter than egui's default gray, so the dense numbers read clearly.
             style.visuals.override_text_color = Some(egui::Color32::from_gray(235));
@@ -558,16 +560,13 @@ impl App {
                                 paint_bar(ui, rect, (peak / col_max[i]) as f32, FAINT);
                                 paint_bar(ui, rect, (current / col_max[i]) as f32, BAR);
                             }
+                            // The main value, the same way in every column so the figures line up across columns.
+                            ui.with_layout(right, |ui| ui.label(col.text(usage)));
+                            // The shared-RAM figure, painted at a fixed inset so these line up down their own sub-column.
                             if *col == Col::Ram && usage.shared > 0 {
-                                // Paint both figures directly so the "sh" numbers line up down the column, main value at the right edge.
                                 let rect = ui.max_rect();
-                                let gap = ui.spacing().item_spacing.x;
-                                let color = ui.visuals().text_color();
-                                let right_center = egui::Align2::RIGHT_CENTER;
-                                ui.painter().text(egui::pos2(rect.right() - gap, rect.center().y), right_center, col.text(usage), egui::TextStyle::Button.resolve(ui.style()), color);
-                                ui.painter().text(egui::pos2(rect.right() - gap - SH_INSET, rect.center().y), right_center, format!("{} sh", size(usage.shared)), egui::TextStyle::Small.resolve(ui.style()), color);
-                            } else {
-                                ui.with_layout(right, |ui| ui.label(col.text(usage)));
+                                let at = egui::pos2(rect.right() - ui.spacing().item_spacing.x - SH_INSET, rect.center().y);
+                                ui.painter().text(at, egui::Align2::RIGHT_CENTER, format!("{} sh", size(usage.shared)), egui::TextStyle::Small.resolve(ui.style()), ui.visuals().text_color());
                             }
                             // A click anywhere in a value column sorts by it; its tooltip shows here too, not just in the header.
                             let cell = ui.interact(ui.max_rect(), ui.id().with("sort"), egui::Sense::click()).on_hover_text(col_tips[i].clone());
