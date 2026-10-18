@@ -237,6 +237,8 @@ struct App {
     ctx: egui::Context,
     /// The last place the window was shown normally, kept across minimizing and maximizing.
     window: Option<WindowPlace>,
+    /// Set when relaunching as admin, so the current window place and sort are flushed to disk before the elevated copy starts.
+    relaunching: bool,
 }
 
 impl App {
@@ -284,6 +286,7 @@ impl App {
             placed: false,
             col_ranges: Vec::new(),
             window: cc.storage.and_then(|storage| eframe::get_value(storage, WINDOW_KEY)),
+            relaunching: false,
             ctx,
         }
     }
@@ -635,7 +638,8 @@ impl App {
             self.expanded.insert(name);
         }
         if relaunch {
-            sampler::relaunch_as_admin();
+            // Close, which saves and then relaunches, so the elevated copy opens with the same window place and sort.
+            self.relaunching = true;
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
         if let Some(pids) = kill {
@@ -677,6 +681,11 @@ impl eframe::App for App {
             None => storage.set_string(WINDOW_KEY, String::new()),
         }
         eframe::set_value(storage, SORT_KEY, &(self.sort, self.alt));
+        if self.relaunching {
+            // Write this window's place and sort to disk, then start the elevated copy so it restores the same config.
+            storage.flush();
+            sampler::relaunch_as_admin();
+        }
     }
 
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
