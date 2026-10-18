@@ -38,6 +38,10 @@ const CORE_BAR: egui::Color32 = egui::Color32::from_rgb(90, 140, 210);
 const SYSTEM_TEXT: egui::Color32 = egui::Color32::from_rgb(130, 180, 245);
 /// How far the shared-RAM figure sits left of the cell's right edge, so the "sh" numbers line up down the column.
 const SH_INSET: f32 = 58.0;
+/// A faint wash over the column under the pointer, hinting it can be clicked to sort.
+const HOVER_COL: egui::Color32 = egui::Color32::from_rgba_premultiplied(13, 13, 13, 13);
+/// A soft, full-height wash marking the sorted column, gentler than a hard white frame.
+const SORTED_COL: egui::Color32 = egui::Color32::from_rgba_premultiplied(24, 24, 24, 24);
 const NAME_TIP: &str = "Programs by executable, and memory no program owns";
 const RAM_TIP: &str = "Private RAM. The smaller \"sh\" figure is RAM shared with other programs, not counted in the main number";
 const COMMIT_TIP: &str = "Private RAM + page file";
@@ -226,6 +230,8 @@ struct App {
     offer_admin: bool,
     /// Whether the window has been confirmed on a monitor, so the off-screen check can stop.
     placed: bool,
+    /// Each column's horizontal span from the last frame, to tell which column the pointer is over.
+    col_ranges: Vec<egui::Rangef>,
     ctx: egui::Context,
     /// The last place the window was shown normally, kept across minimizing and maximizing.
     window: Option<WindowPlace>,
@@ -271,9 +277,23 @@ impl App {
             history: VecDeque::new(),
             offer_admin: sampler::offer_admin(),
             placed: false,
+            col_ranges: Vec::new(),
             window: cc.storage.and_then(|storage| eframe::get_value(storage, WINDOW_KEY)),
             ctx,
         }
+    }
+
+    /// The hover text for a column: what it means, any hardware detail, and the sort note.
+    fn column_tip(&self, col: Col, tip: &str) -> String {
+        let details = &self.sample.details;
+        let detail = match col {
+            Col::Cpu | Col::Core => details.cpu.as_str(),
+            Col::Commit => details.pagefile.as_str(),
+            Col::Vram(gpu) => self.sample.gpus.get(gpu).map_or("", |gpu| gpu.name.as_str()),
+            _ => "",
+        };
+        let peak = if col == Col::Name { "" } else { PEAK_TIP };
+        [tip, detail, peak].into_iter().filter(|line| !line.is_empty()).collect::<Vec<_>>().join("\n")
     }
 
     /// The largest value a column reached over the recent history, which the background bars scale against,
@@ -370,6 +390,14 @@ impl App {
         ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
         // The table's horizontal span, to detect hovering a whole row, not just its first cell.
         let table_x = ui.max_rect().x_range();
+        // Each column's explanation, and which column the pointer is over, using last frame's spans since this frame's come from rendering.
+        let col_tips: Vec<String> = cols.iter().map(|(col, _, tip)| self.column_tip(*col, tip)).collect();
+        let col_hover = ui
+            .ctx()
+            .pointer_latest_pos()
+            .filter(|pos| ui.max_rect().contains(*pos))
+            .and_then(|pos| self.col_ranges.iter().position(|range| range.contains(pos.x)));
+        let mut col_ranges = vec![egui::Rangef::new(0.0, 0.0); cols.len()];
         let mut builder = TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
@@ -387,19 +415,13 @@ impl App {
         builder = builder.column(Column::initial(95.0).at_least(50.0).resizable(false));
         builder
             .header(header_height, |mut header| {
-                for (col, title, tip) in &cols {
+                for (i, (col, title, _)) in cols.iter().enumerate() {
                     header.col(|ui| {
+                        // Remember this column's span for next frame's pointer test, and wash the sorted and hovered columns.
+                        col_ranges[i] = ui.max_rect().expand2(0.5 * ui.spacing().item_spacing).x_range();
+                        paint_col_tint(ui, self.sort == *col, Some(i) == col_hover);
                         // A click anywhere in the header cell sorts, and hovering it explains the column; added first so the search box on top still gets its own clicks.
-                        let details = &self.sample.details;
-                        let detail = match col {
-                            Col::Cpu | Col::Core => details.cpu.as_str(),
-                            Col::Commit => details.pagefile.as_str(),
-                            Col::Vram(gpu) => self.sample.gpus.get(*gpu).map_or("", |gpu| gpu.name.as_str()),
-                            _ => "",
-                        };
-                        let peak = if *col == Col::Name { "" } else { PEAK_TIP };
-                        let tooltip = [tip.as_str(), detail, peak].into_iter().filter(|line| !line.is_empty()).collect::<Vec<_>>().join("\n");
-                        let cell = ui.interact(ui.max_rect(), ui.id().with("sort"), egui::Sense::click()).on_hover_text(tooltip);
+                        let cell = ui.interact(ui.max_rect(), ui.id().with("sort"), egui::Sense::click()).on_hover_text(col_tips[i].clone());
                         let align = if *col == Col::Name { egui::Align::Min } else { egui::Align::Max };
                         // The running total above the hovered program, as a fraction of a header bar's full width; only on the sorted column.
                         let sorted = self.sort == *col;
@@ -449,12 +471,6 @@ impl App {
                         if cell.clicked() {
                             sort = Some(*col);
                         }
-                        // Mark the sorted column with a white frame around its whole header, both rows,
-                        // grown by half the cell spacing so it reaches the column dividers, like the table's own gapless fills.
-                        if self.sort == *col {
-                            let frame = cell.rect.expand2(0.5 * ui.spacing().item_spacing);
-                            ui.painter().rect_stroke(frame, egui::CornerRadius::ZERO, egui::Stroke::new(1.0, egui::Color32::WHITE), egui::StrokeKind::Middle);
-                        }
                     });
                 }
             })
@@ -467,6 +483,7 @@ impl App {
                     };
                     let mut acted = false;
                     row.col(|ui| {
+                        paint_col_tint(ui, self.sort == Col::Name, col_hover == Some(0));
                         // Hovering anywhere in the row (its full-width band) reveals the end buttons and highlights its header share.
                         // Asked of the context, since the cell's own check clips to the cell; only the row's visible height counts.
                         let band = egui::Rect::from_x_y_ranges(table_x, ui.clip_rect().y_range());
@@ -527,6 +544,7 @@ impl App {
                     });
                     for (i, (col, ..)) in cols.iter().enumerate().skip(1) {
                         row.col(|ui| {
+                            paint_col_tint(ui, self.sort == *col, Some(i) == col_hover);
                             // The Network column is empty without admin rights, so the prompt to get them goes there.
                             if *col == Col::Net && self.offer_admin {
                                 admin_prompt(ui, index, &mut relaunch);
@@ -551,8 +569,14 @@ impl App {
                             } else {
                                 ui.with_layout(right, |ui| ui.label(col.text(usage)));
                             }
+                            // A click anywhere in a value column sorts by it; its tooltip shows here too, not just in the header.
+                            let cell = ui.interact(ui.max_rect(), ui.id().with("sort"), egui::Sense::click()).on_hover_text(col_tips[i].clone());
+                            if cell.clicked() {
+                                sort = Some(*col);
+                            }
                         });
                     }
+                    // Clicking a value cell sorts (handled above); only a click landing on the name row toggles its processes.
                     if let Some(group) = group
                         && group.procs.len() > 1
                         && !acted
@@ -563,6 +587,7 @@ impl App {
                 });
             });
 
+        self.col_ranges = col_ranges;
         self.hovered = now_hovered;
         if let Some(col) = sort {
             // A new column starts by its recent peak (names A to Z); clicking it again flips to the current value (names Z to A).
@@ -718,6 +743,17 @@ fn admin_prompt(ui: &mut egui::Ui, row: usize, relaunch: &mut bool) {
             });
         }
         _ => {}
+    }
+}
+
+/// Washes a cell's full width, out to the column dividers, to mark the sorted column and the one under the pointer.
+fn paint_col_tint(ui: &egui::Ui, selected: bool, hovered: bool) {
+    let rect = ui.max_rect().expand2(0.5 * ui.spacing().item_spacing);
+    if selected {
+        ui.painter().rect_filled(rect, egui::CornerRadius::ZERO, SORTED_COL);
+    }
+    if hovered {
+        ui.painter().rect_filled(rect, egui::CornerRadius::ZERO, HOVER_COL);
     }
 }
 
