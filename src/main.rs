@@ -385,8 +385,8 @@ impl App {
         };
 
         let (mut sort, mut toggle, mut relaunch, mut kill, mut now_hovered) = (None, None, false, None, None);
-        // Set when the top-row buttons are clicked: launch Task Manager, or toggle whether we replace it.
-        let (mut launch_tm, mut set_default) = (false, None);
+        // Set when the toolbar buttons are clicked: launch Task Manager or Resource Monitor, or toggle whether we replace Task Manager.
+        let (mut launch_tm, mut launch_resmon, mut set_default) = (false, false, None);
         let height = ui.spacing().interact_size.y;
         // The totals or filter on top, the sortable title below.
         let header_height = 2.0 * (height + ui.spacing().item_spacing.y);
@@ -395,9 +395,26 @@ impl App {
         ui.style_mut().interaction.selectable_labels = false;
         // A regular, always-present scroll bar rather than a thin overlay one.
         ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
-        // The table's horizontal span, to detect hovering a whole row, and its vertical span, to draw the hovered column's edges.
+        // A slim toolbar above the table: replace Task Manager, and open the built-in tools.
+        ui.horizontal(|ui| {
+            let (label, tip) = if self.default_tm {
+                ("Unset default", "Stop replacing Task Manager; restore the Windows default (needs admin)")
+            } else {
+                ("Set default", "Open tuskManager on Ctrl+Shift+Esc instead of Task Manager (needs admin)")
+            };
+            if ui.button(label).on_hover_text(tip).clicked() {
+                set_default = Some(!self.default_tm);
+            }
+            if ui.button("Task Manager").on_hover_text("Open the built-in Windows Task Manager").clicked() {
+                launch_tm = true;
+            }
+            if ui.button("Resource Monitor").on_hover_text("Open the built-in Windows Resource Monitor").clicked() {
+                launch_resmon = true;
+            }
+        });
+        // The table's horizontal span, to detect hovering a whole row, and its vertical span (below the toolbar), to draw the hovered column's edges.
         let table_x = ui.max_rect().x_range();
-        let table_y = ui.max_rect().y_range();
+        let table_y = egui::Rangef::new(ui.min_rect().bottom(), ui.max_rect().bottom());
         // Each column's explanation, and which column the pointer is over, using last frame's spans since this frame's come from rendering.
         let col_tips: Vec<String> = cols.iter().map(|(col, _, tip)| self.column_tip(*col, tip)).collect();
         let col_hover = ui
@@ -474,30 +491,7 @@ impl App {
                             }
                             // Plain text, not a button: the whole header cell handles the click to sort and the tooltip.
                             let arrow = sort_arrow(self.sort == *col, *col, self.alt);
-                            if *col == Col::Name {
-                                // The launch and replace buttons sit in the empty space beside the "Name" title, costing no extra height.
-                                egui::containers::Sides::new().show(
-                                    ui,
-                                    |ui| {
-                                        ui.label(format!("{title}{arrow}"));
-                                    },
-                                    |ui| {
-                                        if ui.button("Task Mgr").on_hover_text("Open the built-in Windows Task Manager").clicked() {
-                                            launch_tm = true;
-                                        }
-                                        let (label, tip) = if self.default_tm {
-                                            ("Default \u{2713}", "tuskManager opens on Ctrl+Shift+Esc; click to restore Windows Task Manager (needs admin)")
-                                        } else {
-                                            ("Set default", "Open tuskManager on Ctrl+Shift+Esc instead of Task Manager (needs admin)")
-                                        };
-                                        if ui.button(label).on_hover_text(tip).clicked() {
-                                            set_default = Some(!self.default_tm);
-                                        }
-                                    },
-                                );
-                            } else {
-                                ui.label(format!("{title}{arrow}"));
-                            }
+                            ui.label(format!("{title}{arrow}"));
                         });
                         if cell.clicked() {
                             sort = Some(*col);
@@ -649,6 +643,9 @@ impl App {
         }
         if launch_tm {
             sampler::launch_task_manager();
+        }
+        if launch_resmon {
+            sampler::launch_resource_monitor();
         }
         if let Some(enable) = set_default {
             sampler::set_default_task_manager(enable);

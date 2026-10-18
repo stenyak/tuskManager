@@ -863,18 +863,21 @@ pub fn set_default_task_manager(enable: bool) {
     unsafe { ShellExecuteW(None, w!("runas"), w!("reg.exe"), PCWSTR(command.as_ptr()), PCWSTR::null(), SW_HIDE) };
 }
 
-/// Opens Windows Task Manager, side-stepping our own interception when we are the default.
+/// Opens the real Windows Task Manager. When we're the default it refuses to run from a copy and re-launches the real
+/// taskmgr.exe, which we intercept, so we briefly drop the debugger key, start it, wait, then set the key back; this needs admin.
 pub fn launch_task_manager() {
-    // A copy under another name isn't matched by the debugger key, so it starts the real Task Manager.
-    if is_default_task_manager()
-        && let Ok(root) = std::env::var("SystemRoot")
-    {
-        let dst = std::env::temp_dir().join("WindowsTaskManager.exe");
-        if std::fs::copy(std::path::Path::new(&root).join("System32").join("taskmgr.exe"), &dst).is_ok() {
-            let path: Vec<u16> = dst.as_os_str().encode_wide().chain([0]).collect();
-            unsafe { ShellExecuteW(None, w!("open"), PCWSTR(path.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
-            return;
-        }
+    if is_default_task_manager() {
+        let key = r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\taskmgr.exe";
+        let exe = std::env::current_exe().unwrap_or_default();
+        let command = format!(r#"/c reg delete "{key}" /v Debugger /f & start "" taskmgr.exe & ping -n 4 127.0.0.1 >nul & reg add "{key}" /v Debugger /t REG_SZ /d "{}" /f"#, exe.display());
+        let command: Vec<u16> = command.encode_utf16().chain([0]).collect();
+        unsafe { ShellExecuteW(None, w!("runas"), w!("cmd.exe"), PCWSTR(command.as_ptr()), PCWSTR::null(), SW_HIDE) };
+    } else {
+        unsafe { ShellExecuteW(None, w!("open"), w!("taskmgr.exe"), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
     }
-    unsafe { ShellExecuteW(None, w!("open"), w!("taskmgr.exe"), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
+}
+
+/// Opens Windows Resource Monitor, which we don't intercept, so a direct launch is enough.
+pub fn launch_resource_monitor() {
+    unsafe { ShellExecuteW(None, w!("open"), w!("resmon.exe"), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
 }
